@@ -19,3 +19,7 @@ class SemiringTest(absltest.TestCase):
         'A semiring value must consist of ndarrays of a common shape',
     ):
       semirings.value_shape({'a': torch.zeros([1, 2]), 'b': torch.ones([2])})
+
+
+if __name__ == '__main__':
+  absltest.main()
