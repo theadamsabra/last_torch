@@ -72,3 +72,65 @@ def value_dtype(x:PyTree) -> DType:
     dtypes in the same structure as x.
   """
   return pytree.tree_map(lambda x_: x_.dtype, x)
+
+class Semiring(Generic[T]):
+  """Base Semiring interface.
+
+  See https://en.wikipedia.org/wiki/Semiring for what a semiring is. A Semiring
+  object holds methods that implement the semiring operations. To simplify
+  non-semiring operations on the semiring values, the semiring values are not
+  typed: for most basic semirings, each value is a single ndarray; for some more
+  complex semirings (e.g. Expectation or Cartesian), the values can be a tuple
+  of ndarrays.
+
+  In general, a semiring value under some semiring is represented as a PyTree
+  of identically shaped ndarrays, with possibly different dtypes. The shape
+  and dtypes of a semiring value can be obtained with methods
+  `last.semirings.value_shape()` and `last.semirings.value_dtype()`.
+
+  Semiring is not an abstract base class because we allow operations to be
+  unimplemented (e.g. `prod`, is not commonly used).
+  """
+
+  def zeros(self, shape: Sequence[int], dtype: Optional[DType] = None) -> T:
+    """Semiring zeros in the given shape and dtype.
+
+    Args:
+      shape: Desired output shape.
+      dtype: Optional PyTree of dtypes.
+
+    Returns:
+      If dtype is None, semiring zero values in the specified shape with
+      reasonable default dtypes. Otherwise, semiring zero values in the
+      specified shape with the specified dtypes.
+    """
+    raise NotImplementedError
+  def ones(self, shape: Sequence[int], dtype: Optional[DType] = None) -> T:
+    """Semiring ones in the given shape and dtype.
+
+    Args:
+      shape: Desired output shape.
+      dtype: Optional PyTree of dtypes.
+
+    Returns:
+      If dtype is None, semiring one values in the specified shape with
+      reasonable default dtypes. Otherwise, semiring one values in the
+      specified shape with the specified dtypes.
+    """
+    raise NotImplementedError
+
+  def times(self, a: T, b: T) -> T:
+    """Semiring multiplication between two values."""
+    raise NotImplementedError
+
+  def plus(self, a: T, b: T) -> T:
+    """Semiring addition between two values."""
+    raise NotImplementedError
+
+  def prod(self, a: T, axis: int) -> T:
+    """Semiring multiplication along a single axis."""
+    raise NotImplementedError
+
+  def sum(self, a: T, axis: int) -> T:
+    """Semiring addition along a single axis."""
+    raise NotImplementedError
