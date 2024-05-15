@@ -134,3 +134,35 @@ class Semiring(Generic[T]):
   def sum(self, a: T, axis: int) -> T:
     """Semiring addition along a single axis."""
     raise NotImplementedError
+
+class _Real(Semiring[torch.Tensor]):
+  """Real semiring."""
+
+  @staticmethod
+  def zeros(
+      shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> torch.Tensor:
+    return torch.zeros(shape, dtype=dtype)
+  
+  @staticmethod
+  def ones(shape: Sequence[int], dtype: Optional[DType] = None) -> torch.Tensor:
+    return torch.ones(shape, dtype=dtype)
+  
+  @staticmethod
+  def times(a:torch.Tensor, b:torch.Tensor) -> torch.Tensor:
+    return a * b
+
+  @staticmethod
+  def plus(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a + b
+
+  @staticmethod
+  def prod(a: torch.Tensor, axis: int) -> torch.Tensor:
+    return torch.prod(a, axis=axis)
+
+  @staticmethod
+  def sum(a: torch.Tensor, axis: int) -> torch.Tensor:
+    return torch.sum(a, axis=axis)
+
+
+Real = _Real() 
