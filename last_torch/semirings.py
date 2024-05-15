@@ -56,3 +56,19 @@ def value_shape(x:PyTree) -> tuple[int, ...]:
           f'Got inconsistent shapes {result} vs {i} for PyTree: {x!r}'
       )
   return result
+
+def value_dtype(x:PyTree) -> DType:
+  """Obtains the dtypes of a semiring value.
+
+  Different leaves of a semiring value may have different dtypes. Methods
+  such as Semiring.{zeros,ones} can take a PyTree of dtypes in the same
+  structure as the corresponding semiring values. This function can be used
+  to extract such a dtype PyTree from a semiring value.
+
+  Args:
+    x: Some semiring value.
+
+  Returns:
+    dtypes in the same structure as x.
+  """
+  return pytree.tree_map(lambda x_: x_.dtype, x)
