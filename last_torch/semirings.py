@@ -43,6 +43,10 @@ def value_shape(x:PyTree) -> tuple[int, ...]:
   Raises:
     ValueError: If the leaves of x do not have a common shape.
   """
+  if x == None:
+    raise ValueError(
+        f'No common shape can be derived for an empty PyTree: {x!r}'
+    )
   shapes = [tuple(i.shape) for i in pytree.tree_leaves(x)]
   if not shapes:
     raise ValueError(
