@@ -20,6 +20,7 @@ from typing import Any, Callable, Generic, Optional, TypeVar
 
 import torch
 import torch.utils._pytree as pytree 
+from functorch import vjp
 
 # Types for documentation purposes
 DType = Any
@@ -110,6 +111,7 @@ class Semiring(Generic[T]):
       specified shape with the specified dtypes.
     """
     raise NotImplementedError
+
   def ones(self, shape: Sequence[int], dtype: Optional[DType] = None) -> T:
     """Semiring ones in the given shape and dtype.
 
@@ -172,9 +174,41 @@ class _Real(Semiring[torch.Tensor]):
 
 Real = _Real() 
 
+
 def _check_axis(a: torch.Tensor, axis: int) -> None:
   if not isinstance(axis, int):
     raise ValueError(f'Only int axis is supported, got axis={axis!r}')
   if not -a.ndim <= axis < a.ndim:
     raise ValueError(
         f'Invalid reduction axis={axis!r} for input shape {a.shape}')
+
+
+class _Log(Semiring[torch.Tensor]):
+  """Log semiring."""
+
+  @staticmethod
+  def zeros(
+    shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> torch.Tensor:
+    return torch.full(shape, -torch.inf, dtype=dtype)
+
+  @staticmethod
+  def ones(shape: Sequence[int], dtype: Optional[DType] = None) -> torch.Tensor:
+    return torch.zeros(shape, dtype=dtype)
+  
+  @staticmethod
+  def times(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a + b
+  
+  @staticmethod
+  def plus(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a, b = torch.broadcast_tensors(a, b)
+    return _logaddexp(a,b)
+
+  @staticmethod
+  def prod(a: torch.Tensor, axis: int) -> torch.Tensor:
+    return torch.sum(a, axis)
+  
+  @staticmethod
+  def sum(cls, a: torch.Tensor, axis: int) -> torch.Tensor:
+    _check_axis(a, axis)
