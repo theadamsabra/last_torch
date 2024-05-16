@@ -171,3 +171,10 @@ class _Real(Semiring[torch.Tensor]):
 
 
 Real = _Real() 
+
+def _check_axis(a: torch.Tensor, axis: int) -> None:
+  if not isinstance(axis, int):
+    raise ValueError(f'Only int axis is supported, got axis={axis!r}')
+  if not -a.ndim <= axis < a.ndim:
+    raise ValueError(
+        f'Invalid reduction axis={axis!r} for input shape {a.shape}')
