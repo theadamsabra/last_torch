@@ -134,11 +134,11 @@ class Semiring(Generic[T]):
     """Semiring addition between two values."""
     raise NotImplementedError
 
-  def prod(self, a: T, axis: int) -> T:
+  def prod(self, a: T, dim: int) -> T:
     """Semiring multiplication along a single axis."""
     raise NotImplementedError
 
-  def sum(self, a: T, axis: int) -> T:
+  def sum(self, a: T, dim: int) -> T:
     """Semiring addition along a single axis."""
     raise NotImplementedError
 
@@ -164,12 +164,12 @@ class _Real(Semiring[torch.Tensor]):
     return a + b
 
   @staticmethod
-  def prod(a: torch.Tensor, axis: int) -> torch.Tensor:
-    return torch.prod(a, axis=axis)
+  def prod(a: torch.Tensor, dim: int) -> torch.Tensor:
+    return torch.prod(a, dim)
 
   @staticmethod
-  def sum(a: torch.Tensor, axis: int) -> torch.Tensor:
-    return torch.sum(a, axis=axis)
+  def sum(a: torch.Tensor, dim: int) -> torch.Tensor:
+    return torch.sum(a, dim)
 
 
 Real = _Real() 
@@ -206,12 +206,13 @@ class _Log(Semiring[torch.Tensor]):
     return _logaddexp(a,b)
 
   @staticmethod
-  def prod(a: torch.Tensor, axis: int) -> torch.Tensor:
-    return torch.sum(a, axis)
+  def prod(a: torch.Tensor, dim: int) -> torch.Tensor:
+    return torch.sum(a, dim)
   
   @staticmethod
-  def sum(cls, a: torch.Tensor, axis: int) -> torch.Tensor:
-    _check_axis(a, axis)
+  # TODO: ask about cls and see if logsum handling is necessary:
+  def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
+    _check_axis(a, dim)
 
 # Specialized log{add,sum}exp with safe gradients.
 #
