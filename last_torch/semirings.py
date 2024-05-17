@@ -259,3 +259,29 @@ class _LogAddExp(torch.autograd.Function):
 
 
 _logaddexp = _LogAddExp.apply
+
+
+class _LogSumExp(torch.autograd.Function):
+  """Specialized log add exp with safe gradients."""
+
+  @staticmethod
+  def forward(ctx, a, dim):
+    c = torch.max(a, dim=dim, keepdim=True)
+    safe = torch.isinf(c)
+    c = torch.where(safe, c, 0)
+    e = torch.exp(a - c)
+    z = torch.sum(e, dim=dim, keepdim=True)
+    r = torch.squeeze(c, dim=dim) + torch.log(torch.squeeze(z, dim=dim))
+    ctx.save_for_backward((e, z, dim))
+    return r
+  
+  @staticmethod
+  def backward(ctx, g):
+    e, z, dim, = ctx.saved_tensors
+    safe = z != 0
+    z = torch.where(safe, z, 1)
+    g = torch.unsqueeze(g, dim=dim)
+    return (g / z * e,)
+
+
+_logsumexp = _LogSumExp.apply
