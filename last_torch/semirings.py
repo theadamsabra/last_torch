@@ -20,7 +20,7 @@ from typing import Any, Callable, Generic, Optional, TypeVar
 
 import torch
 import torch.utils._pytree as pytree 
-from functorch import vjp
+from functorch import jacrev, jacfwd
 
 # Types for documentation purposes
 DType = Any
@@ -212,3 +212,50 @@ class _Log(Semiring[torch.Tensor]):
   @staticmethod
   def sum(cls, a: torch.Tensor, axis: int) -> torch.Tensor:
     _check_axis(a, axis)
+
+# Specialized log{add,sum}exp with safe gradients.
+#
+# Scenarios:
+# -   All operands are finite: As expected.
+# -   All operands are -inf: Sum should be -inf. Gradient should be 0.
+# -   All operands are +inf: Sum should be +inf. Gradient should be NaN.
+# -   Mixed finite & -inf operands: Sum as expected. Gradient should be 0 for
+#     -inf; non-0 for others.
+# -   Mixed finite & +inf operands: Sum should +inf. Gradient should be NaN for
+#     +inf; 0 for others.
+# -   Mixed -inf & +inf operands: Sum should be +inf. Gradient should be NaN for
+#     +inf; 0 for -inf.
+# -   Mixed finite, -inf & +inf operands: Sum should be +inf. Gradient should be
+#     NaN for +inf; 0 for others.
+#
+# The different treatment of -inf & +inf comes from their different sources.
+# -   +inf is an indicator of a true error, e.g. an overflow somewhere. It's
+#     thus desirabled to not silence such issues.
+# -   -inf often arises from perfectly legitimate computations such as
+#     `logaddexp(-inf, -inf + x)`, where `x` should not receive a NaN gradient.
+
+
+class _LogAddExp(torch.autograd.Function):
+  """Specialized log add exp with safe gradients."""
+
+  @staticmethod
+  def forward(ctx, a, b):
+    c = torch.maximum(a, b)
+    safe = torch.isfinite(c)
+    c = torch.where(safe, c, 0)
+    ea = torch.exp(a - c)
+    eb = torch.exp(b - c)
+    z = ea + eb
+    ctx.save_for_backward((ea, eb, z))
+    return c + torch.log(z)
+  
+  @staticmethod
+  def backward(ctx, grad):
+    ea, eb, z, = ctx.saved_tensors
+    safe = z != 0
+    z = torch.where(safe, z, 1)
+    scale = grad / z
+    return scale * ea, scale * eb
+
+
+_logaddexp = _LogAddExp.apply
