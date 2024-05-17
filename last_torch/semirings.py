@@ -285,3 +285,5 @@ class _LogSumExp(torch.autograd.Function):
 
 
 _logsumexp = _LogSumExp.apply
+
+Log = _Log()
