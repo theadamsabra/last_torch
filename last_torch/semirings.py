@@ -209,8 +209,7 @@ class _Log(Semiring[torch.Tensor]):
   def prod(a: torch.Tensor, dim: int) -> torch.Tensor:
     return torch.sum(a, dim)
   
-  @staticmethod
-  # TODO: ask about cls and see if logsum handling is necessary:
+  @classmethod
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
 
@@ -288,3 +287,39 @@ class _LogSumExp(torch.autograd.Function):
 _logsumexp = _LogSumExp.apply
 
 Log = _Log()
+
+
+class _MaxTropical(Semiring):
+  """Max tropical semiring.
+
+  The gradients of `plus` and `sum` is guaranteed to be non-zero on exactly 1
+  input element, even in the event of a tie.
+  """
+
+  @staticmethod
+  def zeros(
+    shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> torch.Tensor:
+    return torch.full(shape, -torch.inf, dtype=dtype)
+
+  @staticmethod
+  def ones(shape: Sequence[int], dtype: Optional[DType] = None) -> torch.Tensor:
+    return torch.zeros(shape, dtype=dtype)
+  
+  @staticmethod
+  def times(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    return a + b
+  
+  @staticmethod
+  def plus(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    a, b = torch.broadcast_tensors(a, b)
+    return _maximum(a, b)
+
+  @staticmethod
+  def prod(a: torch.Tensor, dim: int) -> torch.Tensor:
+    return torch.sum(a, dim=dim)
+
+  @classmethod
+  def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
+    _check_axis(a, dim)
+    # Special handling is needed because 
