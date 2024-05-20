@@ -210,6 +210,7 @@ class _Log(Semiring[torch.Tensor]):
     return torch.sum(a, dim)
   
   @classmethod
+  # TODO: investigate torch.tensor for 0 dim handling
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
 
@@ -320,6 +321,6 @@ class _MaxTropical(Semiring):
     return torch.sum(a, dim=dim)
 
   @classmethod
+  # TODO: investigate torch.tensor for 0 dim handling
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
-    # Special handling is needed because 
