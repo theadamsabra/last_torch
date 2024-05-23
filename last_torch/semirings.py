@@ -374,3 +374,87 @@ class Max(torch.autograd.Function):
     return (g * mask,)
 
 
+_max = Max.apply
+
+
+@dataclasses.dataclass(frozen=True)
+class Expectation(Generic[T, S], Semiring[tuple[T,S]]):
+  """Jason Eisner's expectation semiring.
+
+  In most cases, use LogLogExpectation below directly.
+
+  See https://www.cs.jhu.edu/~jason/papers/eisner.fsmnlp01.pdf for reference.
+
+  Each semiring value is a tuple (w, x):
+  -   w: The weight of this tuple, expressed in the self.w semiring.
+  -   x: The weighted sum for some corresponding weighted values, expressed in
+      the self.x semiring.
+
+  To create a semiring value from a weight-value pair, use
+  `self.weighted()`. See `ExpectationTest.test_entropy` for an
+  example of using the expectation semiring to compute the entropy of
+  probability distributions.
+
+  Attributes:
+    w: Semiring for representing weights.
+    x: Semiring for representing weighted sums.
+    w_to_x: Function to convert a value from semiring `w` to semiring `x`.
+  """
+  w: Semiring[T]
+  x: Semiring[S]
+  w_to_x: Callable[[T], S]
+
+  def weighted(self, w: T, v: S) -> tuple[T, S]:
+    # When w is zero in semiring self.w, self.w_to_x(w) is zero in semiring
+    # self.x. We stipulate that the weighted value should always be zero in
+    # semiring self.x. This is useful for avoiding NaNs when both semirings are
+    # Log and w is -inf and v is +inf (e.g. computing 0 log 0 under Log).
+    w_is_zero = w == self.w.zeros([], w.dtype)
+    safe_v = torch.where(w_is_zero, 0, v)
+    return w, self.x.times(self.w_to_x(w), safe_v)
+
+  def zeros(
+      self, shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> tuple[T, S]:
+    if dtype is None:
+      dtype_w = dtype_x = None
+    else:
+      dtype_w, dtype_x = dtype
+    return self.w.zeros(shape, dtype_w), self.x.zeros(shape, dtype_x)
+  
+  def ones(
+      self, shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> tuple[T, S]:
+    if dtype is None:
+      dtype_w = dtype_x = None
+    else:
+      dtype_w, dtype_x = dtype
+    return self.w.ones(shape, dtype_w), self.x.zeros(shape, dtype_x)
+  
+  def times(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
+    w_a, x_a = a
+    w_b, x_b = b
+    w = self.w.times(w_a, w_b)
+    x = self.x.plus(
+      self.x.times(self.w_to_x(w_a), x_b),
+      self.x.times(self.w_to_x(w_b), x_a)
+    )
+    return w, x
+  
+  def plus(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
+    w_a, x_a = a
+    w_b, x_b = b
+    w = self.w.plus(w_a, w_b)
+    x = self.x.plus(x_a, x_b)
+    return w, x
+
+  def sum(self, a: tuple[T, S], axis: int) -> tuple[T, S]:
+    w, x = a
+    w = self.w.sum(w, axis)
+    x = self.x.sum(x, axis)
+    return w, x
+
+
+# Expectation semiring with weight and weighted sum represented both using the
+# Log semiring. Therefore only summation on non-negative value is allowed.
+LogLogExpectation = Expectation(w=Log, x=Log, w_to_x=lambda x: x)
