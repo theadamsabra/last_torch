@@ -54,14 +54,12 @@ def zero_and_one_test(semiring):
         semiring.plus(semiring.zeros((1, 2)), semiring.zeros((3, 1))),
         semiring.zeros((3, 2)))
 
-    # TODO: Uncomment when cls is figured out for Log Semiring
-    # npt.assert_array_equal(
-    #     semiring.sum(torch.zeros([3, 0]), dim=0), torch.zeros([0]))
+    npt.assert_array_equal(
+        semiring.sum(torch.zeros([3, 0]), dim=0), torch.zeros([0]))
     npt.assert_array_equal(
         semiring.prod(torch.zeros([3, 0]), dim=0), torch.zeros([0]))
 
-    # TODO: Uncomment when cls is figured out for Log Semiring
-    # npt.assert_array_equal(semiring.sum(torch.zeros([3, 0]), dim=1), zero)
+    npt.assert_array_equal(semiring.sum(torch.zeros([3, 0]), dim=1), zero)
     npt.assert_array_equal(semiring.prod(torch.zeros([3, 0]), dim=1), one)
 
 
@@ -83,6 +81,7 @@ class SemiringTest(absltest.TestCase):
     ):
       semirings.value_shape({'a': torch.zeros([1, 2]), 'b': torch.ones([2])})
 
+
 class RealTest(absltest.TestCase):
 
   def test_basics(self):
@@ -101,9 +100,8 @@ class LogTest(absltest.TestCase):
     npt.assert_allclose(
         semirings.Log.plus(torch.Tensor([2]), torch.Tensor([3])), 3.31326169
     )
-    # TODO: uncomment test after asking about cls
-    # npt.assert_allclose(
-    #     semirings.Log.sum(torch.Tensor([2, 3]), dim=0), 3.31326169)
+    npt.assert_allclose(
+        semirings.Log.sum(torch.Tensor([2, 3]), dim=0), 3.31326169)
     zero_and_one_test(semirings.Log)
 
 

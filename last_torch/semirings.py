@@ -213,7 +213,7 @@ class _Log(Semiring[torch.Tensor]):
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
     # Special handling for safe gradients:
-    if a.size > 0:
+    if torch.numel(a) > 0:
       return _logsumexp(a, dim)
     # Summing empty input should result in zeros:
     if dim < 0:
@@ -248,7 +248,7 @@ class _LogAddExp(torch.autograd.Function):
 
   @staticmethod
   def forward(ctx, a, b):
-    c = torch.maximum(a, b)
+    c = torch.max(a, b)
     safe = torch.isfinite(c)
     c = torch.where(safe, c, 0)
     ea = torch.exp(a - c)
@@ -274,8 +274,8 @@ class _LogSumExp(torch.autograd.Function):
 
   @staticmethod
   def forward(ctx, a, dim):
-    c = torch.max(a, dim=dim, keepdim=True)
-    safe = torch.isinf(c)
+    c = torch.max(a)
+    safe = torch.isfinite(c)
     c = torch.where(safe, c, 0)
     e = torch.exp(a - c)
     z = torch.sum(e, dim=dim, keepdim=True)
@@ -331,7 +331,7 @@ class _MaxTropical(Semiring):
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
     # Special handling is used for safe gradients.
-    if a.size > 0:
+    if torch.numel(a) > 0:
       return _max(a, dim=dim)
     # Summing empty input should result in zeros:
     if dim < 0:
@@ -373,4 +373,4 @@ class Max(torch.autograd.Function):
     g = torch.unsqueeze(g, dim=dim)
     return (g * mask,)
 
-_max = Max.apply
+
