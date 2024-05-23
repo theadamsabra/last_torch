@@ -210,9 +210,16 @@ class _Log(Semiring[torch.Tensor]):
     return torch.sum(a, dim)
   
   @classmethod
-  # TODO: investigate torch.tensor for 0 dim handling
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
+    # Special handling for safe gradients:
+    if a.size > 0:
+      return _logsumexp(a, dim)
+    # Summing empty input should result in zeros:
+    if dim < 0:
+      dim += a.ndim
+    result_shape = a.shape[:dim] + a.shape[dim + 1:]
+    return cls.zeros(result_shape, a.dtype)
 
 # Specialized log{add,sum}exp with safe gradients.
 #
@@ -321,9 +328,19 @@ class _MaxTropical(Semiring):
     return torch.sum(a, dim=dim)
 
   @classmethod
-  # TODO: investigate torch.tensor for 0 dim handling
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
+    # Special handling is used for safe gradients.
+    if a.size > 0:
+      return _max(a, dim=dim)
+    # Summing empty input should result in zeros:
+    if dim < 0:
+      dim += a.ndim
+    result_shape = a.shape[:dim] + a.shape[dim + 1:]
+    return cls.zeros(result_shape, a.dtype)
+
+
+MaxTropical = _MaxTropical()
 
 
 class Maximum(torch.autograd.Function):
