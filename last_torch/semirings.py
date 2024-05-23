@@ -324,3 +324,36 @@ class _MaxTropical(Semiring):
   # TODO: investigate torch.tensor for 0 dim handling
   def sum(cls, a: torch.Tensor, dim: int) -> torch.Tensor:
     _check_axis(a, dim)
+
+
+class Maximum(torch.autograd.Function):
+
+  @staticmethod
+  def forward(ctx, a, b):
+    ctx.save_for_backward(a >= b)
+    return torch.max(a, b)
+  
+  @staticmethod
+  def backward(ctx, g):
+    choose_a, = ctx.saved_tensors
+    return g * choose_a, g * (1 - choose_a)
+  
+_maximum = Maximum.apply
+
+class Max(torch.autograd.Function):
+
+  @staticmethod
+  def forward(ctx, a, dim):
+    argmax = torch.argmax(a, dim=dim)
+    width = a.shape[dim]
+    ctx.save_for_backward((argmax, width, dim))
+    return torch.max(a, dim=dim)
+  
+  @staticmethod
+  def backward(ctx, g):
+    argmax, width, dim, = ctx.saved_tensors
+    mask = torch.nn.functional.one_hot(argmax, width)
+    g = torch.unsqueeze(g, dim=dim)
+    return (g * mask,)
+
+_max = Max.apply
