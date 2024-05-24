@@ -203,7 +203,7 @@ class _Log(Semiring[torch.Tensor]):
   @staticmethod
   def plus(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     a, b = torch.broadcast_tensors(a, b)
-    return _logaddexp(a,b)
+    return _logaddexp(a,b)[0]
 
   @staticmethod
   def prod(a: torch.Tensor, dim: int) -> torch.Tensor:
@@ -247,19 +247,24 @@ class _LogAddExp(torch.autograd.Function):
   """Specialized log add exp with safe gradients."""
 
   @staticmethod
-  def forward(ctx, a, b):
+  def forward(a, b):
     c = torch.max(a, b)
     safe = torch.isfinite(c)
     c = torch.where(safe, c, 0)
     ea = torch.exp(a - c)
     eb = torch.exp(b - c)
     z = ea + eb
+    return c + torch.log(z), (ea, eb, z)
+
+  @staticmethod
+  def setup_context(ctx, inputs, output):
+    a, b = inputs
+    _, (ea, eb, z) = output
     ctx.save_for_backward((ea, eb, z))
-    return c + torch.log(z)
-  
+
   @staticmethod
   def backward(ctx, grad):
-    ea, eb, z, = ctx.saved_tensors
+    ea, eb, z = ctx.saved_tensors
     safe = z != 0
     z = torch.where(safe, z, 1)
     scale = grad / z
@@ -458,3 +463,52 @@ class Expectation(Generic[T, S], Semiring[tuple[T,S]]):
 # Expectation semiring with weight and weighted sum represented both using the
 # Log semiring. Therefore only summation on non-negative value is allowed.
 LogLogExpectation = Expectation(w=Log, x=Log, w_to_x=lambda x: x)
+
+
+@dataclasses.dataclass(frozen=True)
+class Cartesian(Generic[T, S], Semiring[tuple[T, S]]):
+  """Cartesian product of 2 semirings.
+
+  Attributes:
+    x: The first semiring.
+    y: The second semiring.
+  """
+
+  x: Semiring[T]
+  y: Semiring[S]
+
+  def zeros(
+      self, shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> tuple[T, S]:
+    if dtype is None:
+      dtype_x = dtype_y = None
+    else:
+      dtype_x, dtype_y = None
+    return self.x.zeros(shape, dtype_x), self.y.zeros(shape, dtype_y)
+  
+  def ones(
+      self, shape: Sequence[int], dtype: Optional[DType] = None
+  ) -> tuple[T, S]:
+    if dtype is None:
+      dtype_x = dtype_y = None
+    else:
+      dtype_x, dtype_y = None
+    return self.x.ones(shape, dtype_x), self.y.ones(shape, dtype_y)
+  
+  def times(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
+    a_x, a_y = a
+    b_x, b_y = b
+    return self.x.times(a_x, b_x), self.y.times(a_y, b_y)
+
+  def plus(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
+    a_x, a_y = a
+    b_x, b_y = b
+    return self.x.plus(a_x, b_x), self.y.plus(a_y, b_y)
+
+  def sum(self, a: tuple[T, S], axis: int) -> tuple[T, S]:
+    a_x, a_y = a
+    return self.x.sum(a_x, axis), self.y.sum(a_y, axis)
+
+  def prod(self, a: tuple[T, S], axis: int) -> tuple[T, S]:
+    a_x, a_y = a
+    return self.x.prod(a_x, axis), self.y.prod(a_y, axis) 
