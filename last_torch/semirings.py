@@ -15,12 +15,10 @@
 '''Semirings.'''
 from collections.abc import Sequence
 import dataclasses
-import functools
 from typing import Any, Callable, Generic, Optional, TypeVar
 
 import torch
 import torch.utils._pytree as pytree 
-from functorch import jacrev, jacfwd
 
 # Types for documentation purposes
 DType = Any
@@ -203,7 +201,7 @@ class _Log(Semiring[torch.Tensor]):
   @staticmethod
   def plus(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     a, b = torch.broadcast_tensors(a, b)
-    return _logaddexp(a,b)[0]
+    return _logaddexp(a, b)[0]
 
   @staticmethod
   def prod(a: torch.Tensor, dim: int) -> torch.Tensor:
