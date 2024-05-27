@@ -329,7 +329,7 @@ class CartesianTest(absltest.TestCase):
     self.assertEqual(semirings.value_shape(zero), ())
     self.assertEqual(semirings.value_dtype(zero), (torch.bfloat16, torch.float32))
 
-    def test_arithmetics(self):
+  def test_arithmetics(self):
       semiring = semirings.Cartesian(semirings.Real, semirings.MaxTropical)
       a = (torch.tensor(2.0), torch.tensor(1.0))
       b = (torch.tensor(3.0), torch.tensor(4.0))
