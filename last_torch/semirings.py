@@ -335,7 +335,7 @@ class _MaxTropical(Semiring):
     _check_axis(a, dim)
     # Special handling is used for safe gradients.
     if torch.numel(a) > 0:
-      return _max(a, dim=dim)
+      return _max(a, dim)
     # Summing empty input should result in zeros:
     if dim < 0:
       dim += a.ndim
@@ -349,10 +349,15 @@ MaxTropical = _MaxTropical()
 class Maximum(torch.autograd.Function):
 
   @staticmethod
-  def forward(ctx, a, b):
-    ctx.save_for_backward(a >= b)
+  def forward(a, b):
     return torch.max(a, b)
-  
+
+  @staticmethod
+  def setup_context(ctx, inputs, output):
+    a, b = inputs
+    choose_a = (a >= b).to(a.dtype)
+    ctx.save_for_backward(choose_a)
+
   @staticmethod
   def backward(ctx, g):
     choose_a, = ctx.saved_tensors
@@ -366,15 +371,20 @@ class Max(torch.autograd.Function):
   def forward(ctx, a, dim):
     argmax = torch.argmax(a, dim=dim)
     width = a.shape[dim]
-    ctx.save_for_backward((argmax, width, dim))
-    return torch.max(a, dim=dim)
-  
+    ctx.save_for_backward(argmax, torch.Tensor([width]), torch.Tensor([dim]))
+    return torch.max(a, dim=dim).values
+
   @staticmethod
   def backward(ctx, g):
     argmax, width, dim, = ctx.saved_tensors
-    mask = torch.nn.functional.one_hot(argmax, width)
+    # Can only pass tensors through, so we convert back to int:
+    width = int(width)
+    dim = int(dim)
+    mask = torch.nn.functional.one_hot(argmax, width).to(g.dtype)
+    # Move width back to original dim:
+    mask = torch.movedim(mask, -1, dim)
     g = torch.unsqueeze(g, dim=dim)
-    return (g * mask,)
+    return g * mask, None
 
 
 _max = Max.apply

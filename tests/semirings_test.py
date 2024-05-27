@@ -125,46 +125,46 @@ class RealTest(absltest.TestCase):
 
 def check_sum_axis(self, semiring):
   """Checks that semiring sum handles axes correctly."""
-  xs = torch.arange(2 * 3 * 4 * 5, dtype=torch.float32).reshape([2, 3, 4, 5])
+  xs = torch.arange(2 * 3 * 4 * 5, dtype=torch.float32).reshape([2, 3, 4, 5]).requires_grad_()
 
   with self.subTest('forward'):
-    self.assertEqual(semiring.sum(xs, axis=0).shape, (3, 4, 5))
-    self.assertEqual(semiring.sum(xs, axis=1).shape, (2, 4, 5))
-    self.assertEqual(semiring.sum(xs, axis=2).shape, (2, 3, 5))
-    self.assertEqual(semiring.sum(xs, axis=3).shape, (2, 3, 4))
-    self.assertEqual(semiring.sum(xs, axis=-1).shape, (2, 3, 4))
-    self.assertEqual(semiring.sum(xs, axis=-2).shape, (2, 3, 5))
-    self.assertEqual(semiring.sum(xs, axis=-3).shape, (2, 4, 5))
-    self.assertEqual(semiring.sum(xs, axis=-4).shape, (3, 4, 5))
+    self.assertEqual(semiring.sum(xs, dim=0).shape, (3, 4, 5))
+    self.assertEqual(semiring.sum(xs, dim=1).shape, (2, 4, 5))
+    self.assertEqual(semiring.sum(xs, dim=2).shape, (2, 3, 5))
+    self.assertEqual(semiring.sum(xs, dim=3).shape, (2, 3, 4))
+    self.assertEqual(semiring.sum(xs, dim=-1).shape, (2, 3, 4))
+    self.assertEqual(semiring.sum(xs, dim=-2).shape, (2, 3, 5))
+    self.assertEqual(semiring.sum(xs, dim=-3).shape, (2, 4, 5))
+    self.assertEqual(semiring.sum(xs, dim=-4).shape, (3, 4, 5))
     with self.assertRaisesRegex(ValueError, 'Invalid reduction axis'):
-      semiring.sum(xs, axis=4)
+      semiring.sum(xs, dim=4)
     with self.assertRaisesRegex(ValueError, 'Invalid reduction axis'):
-      semiring.sum(xs, axis=-5)
+      semiring.sum(xs, dim=-5)
     with self.assertRaisesRegex(ValueError, 'Only int axis'):
-      semiring.sum(xs, axis=None)  # type: ignore
+      semiring.sum(xs, dim=None)  # type: ignore
 
   with self.subTest('backward'):
-
-    @torch.autograd.grad
-    def f(xs, axis):
-      zs = semiring.sum(xs, axis=axis)
+    def f(xs, dim):
+      zs = semiring.sum(xs, dim=dim)
       while zs.shape:
-        zs = torch.sum(zs, axis=0)
+        zs = torch.sum(zs, dim=0)
       return zs
 
-    for axis in range(-4, 4):
-      self.assertEqual(f(xs, axis=axis).shape, xs.shape)
+    for dim in range(-4, 4):
+      y = f(xs, dim=dim)
+      grad = torch.autograd.grad(y, xs)[0]
+      self.assertEqual(grad.shape, xs.shape)
 
 
 def check_sum_zero_sized(self, semiring):
   """Checks that semiring sum handles zero-sized dimensions correctly."""
   xs = torch.zeros([0, 2])
 
-  npt.assert_array_equal(semiring.sum(xs, axis=0), semiring.zeros([2]))
-  npt.assert_array_equal(semiring.sum(xs, axis=-2), semiring.zeros([2]))
+  npt.assert_array_equal(semiring.sum(xs, dim=0), semiring.zeros([2]))
+  npt.assert_array_equal(semiring.sum(xs, dim=-2), semiring.zeros([2]))
 
-  self.assertEqual(semiring.sum(xs, axis=1).shape, (0,))
-  self.assertEqual(semiring.sum(xs, axis=-1).shape, (0,))
+  self.assertEqual(semiring.sum(xs, dim=1).shape, (0,))
+  self.assertEqual(semiring.sum(xs, dim=-1).shape, (0,))
 
 
 class LogTest(absltest.TestCase):
@@ -179,6 +179,54 @@ class LogTest(absltest.TestCase):
         semirings.Log.sum(torch.Tensor([2, 3]), dim=0), 3.31326169)
     zero_and_one_test(semirings.Log)
     binary_op_broadcasting_test_times(semirings.Log)
+
+
+class MaxTropicalTest(absltest.TestCase):
+
+  def test_basics(self):
+    npt.assert_array_equal(
+      semirings.MaxTropical.times(torch.Tensor([2]), torch.Tensor([3])), 5
+    )
+    npt.assert_array_equal(
+      semirings.MaxTropical.prod(torch.Tensor([2, 3]), dim=0), 5
+    )
+    npt.assert_array_equal(
+      semirings.MaxTropical.plus(torch.Tensor([2]), torch.Tensor([3])), 3
+    )
+    npt.assert_array_equal(
+      semirings.MaxTropical.sum(torch.Tensor([2,3]), dim=0), 3
+    )
+    zero_and_one_test(semirings.MaxTropical)
+    binary_op_broadcasting_test_times(semirings.MaxTropical)
+
+  def test_plus_grad(self):
+    fun = lambda a: torch.sum(semirings.MaxTropical.plus(a[0], a[1]))
+    a = torch.Tensor([[1., 2., 3.,], [0., 2., 4.]]).requires_grad_()
+    y = fun(a)
+    gradient = torch.autograd.grad(y, a)[0]
+    npt.assert_array_equal(gradient, torch.Tensor([[1., 1., 0.], [0., 0., 1.]]))
+
+  def test_sum_grad(self):
+    fun = lambda a: torch.sum(semirings.MaxTropical.sum(a, dim=0))
+    a = torch.Tensor([[1., 2., 3.,], [0., 2., 4.]]).requires_grad_()
+    y = fun(a)
+    output = torch.Tensor([[1., 1., 0.], [0., 0., 1.]])
+    gradient = torch.autograd.grad(y, a)[0]
+    npt.assert_array_equal(gradient, output)
+
+
+    fun = lambda a: torch.sum(semirings.MaxTropical.sum(a, dim=-1))
+    a = torch.Tensor([[1., 2., 3.,], [0., 2., 4.]]).requires_grad_().T
+    y = fun(a)
+    output = torch.Tensor([[1., 1., 0.], [0., 0., 1.]]).T
+    gradient = torch.autograd.grad(y, a)[0]
+    npt.assert_array_equal(gradient, output)
+
+  def test_sum_axis(self):
+    check_sum_axis(self, semirings.MaxTropical)
+  
+  def test_sum_zero_sized(self):
+    check_sum_zero_sized(self, semirings.MaxTropical)
 
 if __name__ == '__main__':
   absltest.main()
