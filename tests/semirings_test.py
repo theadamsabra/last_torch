@@ -299,5 +299,69 @@ class ExpectationTest(absltest.TestCase):
         entropy, -torch.sum(probs * new_probs * torch.exp(-log_z) *
                           (log_probs + new_log_probs - log_z)))
 
+class CartesianTest(absltest.TestCase):
+
+  def test_basics(self):
+    semiring = semirings.Cartesian(semirings.Real, semirings.MaxTropical)
+    one = semiring.ones([])
+    zero = semiring.zeros([])
+    for wx in [(torch.tensor(1.0), torch.tensor(2.0)), one, zero]:
+      with self.subTest(str(wx)):
+        tree_map(
+            npt.assert_array_equal, semiring.times(wx, one), wx
+        )
+        tree_map(
+            npt.assert_array_equal, semiring.times(one, wx), wx
+        )
+        tree_map(
+            npt.assert_array_equal, semiring.plus(wx, zero), wx
+        )
+        tree_map(
+            npt.assert_array_equal, semiring.plus(zero, wx), wx
+        )
+
+  def test_shape_dtypes(self):
+    semiring = semirings.Cartesian(semirings.Real, semirings.MaxTropical)
+    one = semiring.ones([1, 2], (torch.float32, torch.bfloat16))
+    self.assertEqual(semirings.value_shape(one), (1, 2))
+    self.assertEqual(semirings.value_dtype(one), (torch.float32, torch.bfloat16))
+    zero = semiring.zeros([], (torch.bfloat16, torch.float32))
+    self.assertEqual(semirings.value_shape(zero), ())
+    self.assertEqual(semirings.value_dtype(zero), (torch.bfloat16, torch.float32))
+
+    def test_arithmetics(self):
+      semiring = semirings.Cartesian(semirings.Real, semirings.MaxTropical)
+      a = (torch.tensor(2.0), torch.tensor(1.0))
+      b = (torch.tensor(3.0), torch.tensor(4.0))
+      c = (torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0]))
+
+      with self.subTest('times'):
+        a_times_b = semiring.times(a, b)
+        self.assertIsInstance(a_times_b, tuple)
+        self.assertLen(a_times_b, 2)
+        npt.assert_array_equal(a_times_b[0], 6.0)
+        npt.assert_array_equal(a_times_b[1], 5.0)
+
+      with self.subTest('plus'):
+        a_plus_b = semiring.plus(a, b)
+        self.assertIsInstance(a_plus_b, tuple)
+        self.assertLen(a_plus_b, 2)
+        npt.assert_array_equal(a_plus_b[0], 5.0)
+        npt.assert_array_equal(a_plus_b[1], 4.0)
+
+      with self.subTest('sum'):
+        sum_c = semiring.sum(c, axis=0)
+        self.assertIsInstance(sum_c, tuple)
+        self.assertLen(sum_c, 2)
+        npt.assert_array_equal(sum_c[0], 3.0)
+        npt.assert_array_equal(sum_c[1], 4.0)
+
+      with self.subTest('prod'):
+        prod_c = semiring.prod(c, axis=0)
+        self.assertIsInstance(prod_c, tuple)
+        self.assertLen(prod_c, 2)
+        npt.assert_array_equal(prod_c[0], 2.0)
+        npt.assert_array_equal(prod_c[1], 7.0)
+
 if __name__ == '__main__':
   absltest.main()

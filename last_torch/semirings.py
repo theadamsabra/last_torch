@@ -491,7 +491,7 @@ class Cartesian(Generic[T, S], Semiring[tuple[T, S]]):
     if dtype is None:
       dtype_x = dtype_y = None
     else:
-      dtype_x, dtype_y = None
+      dtype_x, dtype_y = dtype 
     return self.x.zeros(shape, dtype_x), self.y.zeros(shape, dtype_y)
   
   def ones(
@@ -500,7 +500,7 @@ class Cartesian(Generic[T, S], Semiring[tuple[T, S]]):
     if dtype is None:
       dtype_x = dtype_y = None
     else:
-      dtype_x, dtype_y = None
+      dtype_x, dtype_y = dtype 
     return self.x.ones(shape, dtype_x), self.y.ones(shape, dtype_y)
   
   def times(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
