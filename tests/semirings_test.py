@@ -19,7 +19,7 @@ from absl.testing import absltest
 from last_torch import semirings
 import torch
 import numpy.testing as npt
-
+from torch.utils._pytree import tree_map
 
 
 def zero_and_one_test(semiring):
@@ -227,6 +227,77 @@ class MaxTropicalTest(absltest.TestCase):
   
   def test_sum_zero_sized(self):
     check_sum_zero_sized(self, semirings.MaxTropical)
+
+
+class ExpectationTest(absltest.TestCase):
+
+  def test_basics(self):
+    one = semirings.LogLogExpectation.ones([])
+    zero = semirings.LogLogExpectation.zeros([])
+    for wx in [
+      semirings.LogLogExpectation.weighted(torch.Tensor([1]), torch.Tensor([2])),
+      one, zero
+    ]:
+      with self.subTest(str(wx)):
+        tree_map(npt.assert_array_equal,
+                 semirings.LogLogExpectation.times(wx, one), wx)
+        tree_map(npt.assert_array_equal,
+                 semirings.LogLogExpectation.times(one, wx), wx)                 
+        tree_map(npt.assert_array_equal,
+                 semirings.LogLogExpectation.plus(wx, zero), wx)
+        tree_map(npt.assert_array_equal,
+                 semirings.LogLogExpectation.plus(zero, wx), wx)
+  
+  def test_shape_dtypes(self):
+    one = semirings.LogLogExpectation.ones([1, 2], (torch.float32, torch.bfloat16))
+    self.assertEqual(semirings.value_shape(one), (1, 2))
+    self.assertEqual(semirings.value_dtype(one), (torch.float32, torch.bfloat16))
+    zero = semirings.LogLogExpectation.zeros([], (torch.bfloat16, torch.float32))
+    self.assertEqual(semirings.value_shape(zero), ())
+    self.assertEqual(semirings.value_dtype(zero), (torch.bfloat16, torch.float32))
+
+  def test_weighted(self):
+    w, x = semirings.LogLogExpectation.weighted(
+        torch.log(torch.Tensor([0, 1, 2])), torch.log(torch.Tensor([3, 4, 5])))
+    npt.assert_allclose(torch.exp(w), [0, 1, 2])
+    npt.assert_allclose(torch.exp(x), [0 * 3, 1 * 4, 2 * 5])
+
+  def test_weighted_safety(self):
+    w = torch.Tensor([float('-inf')])
+    v = torch.Tensor([float('inf')])
+    w, x = semirings.LogLogExpectation.weighted(w, v)
+    npt.assert_array_equal(w, float('-inf'))
+    npt.assert_array_equal(x, float('-inf'))
+
+  def test_sum(self):
+    w, x = semirings.LogLogExpectation.sum(
+        semirings.LogLogExpectation.weighted(
+            torch.log(torch.Tensor([[0, 1], [2, 3]])),
+            torch.log(torch.Tensor([[4, 5], [6, 7]]))),
+        axis=1)
+    npt.assert_allclose(torch.exp(w), [0 + 1, 2 + 3])
+    npt.assert_allclose(torch.exp(x), [0 * 4 + 1 * 5, 2 * 6 + 3 * 7], rtol=1e-6)
+
+  def test_entropy(self):
+    probs = torch.Tensor([0.25, 0.25, 0.5])
+    log_probs = torch.log(probs)
+    wx = semirings.LogLogExpectation.weighted(log_probs, torch.log(-log_probs))
+    log_z, log_sum = semirings.LogLogExpectation.sum(wx, axis=0)
+    npt.assert_allclose(log_z, 0)
+    entropy = torch.exp(log_sum)
+    npt.assert_allclose(entropy, -torch.sum(probs * log_probs))
+
+    new_probs = torch.Tensor([0.25, 0.5, 0.25])
+    new_log_probs = torch.log(new_probs)
+    new_wx = semirings.LogLogExpectation.weighted(new_log_probs,
+                                                  torch.log(-new_log_probs))
+    log_z, log_sum = semirings.LogLogExpectation.sum(
+        semirings.LogLogExpectation.times(wx, new_wx), axis=0)
+    npt.assert_allclose(torch.exp(log_z), torch.sum(probs * new_probs))
+    entropy = log_z + torch.exp(log_sum - log_z)
+    npt.assert_allclose(
+        entropy, -torch.sum(probs * new_probs * torch.exp(-log_z) *
+                          (log_probs + new_log_probs - log_z)))
 
 if __name__ == '__main__':
   absltest.main()

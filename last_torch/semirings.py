@@ -277,7 +277,7 @@ class _LogSumExp(torch.autograd.Function):
 
   @staticmethod
   def forward(ctx, a, dim):
-    c = torch.max(a)
+    c = torch.max(a, dim=dim, keepdim=True).values
     safe = torch.isfinite(c)
     c = torch.where(safe, c, 0)
     e = torch.exp(a - c)
