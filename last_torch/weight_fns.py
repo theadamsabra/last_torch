@@ -17,7 +17,7 @@
 import abc
 import torch
 
-from typing import Generic, TypeVar, Optional
+from typing import Generic, TypeVar, Optional, Callable
 from torch import nn
 from torch.nn import functional as F
 
@@ -132,3 +132,34 @@ def log_softmax_normalize(
   all_weights = torch.concatenate([torch.unsqueeze(blank, -1), lexical], dim=-1)
   all_weights = F.log_softmax(all_weights)
   return all_weights[..., 0], all_weights[..., 1]
+
+
+class LocallyNormalizedWeightFn(WeightFn[T]):
+  """Wrapper for turning any weight function into a locally normalized one.
+
+  This is the recommended way of obtaining a locally normalized weight function.
+  Algorithms such as those that computes the sequence log-loss may rely on a
+  weight function being of this type to eliminate unnecessary denominator
+  computation.
+
+  It is thus also important for the normalize function to be mathematically
+  correct: let (blank, lexical) be the pair of weights produced by the normalize
+  function, then `jnp.exp(blank) + jnp.sum(jnp.exp(lexical), axis=-1)` should be
+  approximately equal to 1.
+
+  Attributes:
+    weight_fn: Underlying weight function.
+    normalize: Callable that produces normalized log-probabilities from (blank,
+      lexical) weights, e.g. hat_normalize() or log_softmax_normalize().
+  """
+  weight_fn: WeightFn[T]
+  normalize: Callable[[torch.Tensor, torch.Tensor],
+                      tuple[torch.Tensor, torch.Tensor]] = hat_normalize
+
+  def forward(
+      self,
+      cache: T,
+      frame: torch.Tensor,
+      state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    blank, lexical = self.weight_fn(cache, frame, state)
+    return self.normalize(blank, lexical)
