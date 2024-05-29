@@ -19,6 +19,7 @@ import torch
 
 from typing import Generic, TypeVar, Optional
 from torch import nn
+from torch.nn import functional as F
 
 # Weight functions are the only components in GNAT with trainable parameters. We
 # implement weight functions in two parts: WeightFn and WeightFnCacher.
@@ -91,4 +92,24 @@ class WeightFnCacher(nn.Module, Generic[T], abc.ABC):
   @abc.abstractmethod
   def forward(self) -> T:
     """Builds the cached data."""
-  
+
+
+def hat_normalize(blank: torch.Tensor,
+                  lexical: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+  """Local normalization used in the Hybrid Autoregressive Transducer (HAT) paper.
+
+  The sigmoid of the blank weight is directly interpreted as the probability of
+  blank. The lexical probability is then normalized with a log-softmax.
+
+  Args:
+    blank: [batch_dims...] blank weight.
+    lexical: [batch_dims..., vocab_size] lexical weights.
+
+  Returns:
+    Normalized (blank, lexical) weights.
+  """
+  # Outside normalizer
+  z = torch.log(1 + torch.exp(blank))
+  normalized_blank = blank - z
+  normalized_lexical = F.log_softmax(lexical) - torch.unsqueeze(z, -1) 
+  return normalized_blank, normalized_lexical
