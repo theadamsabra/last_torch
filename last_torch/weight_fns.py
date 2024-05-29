@@ -78,4 +78,17 @@ class WeightFn(nn.Module, Generic[T], abc.ABC):
         corresponding `state`.
     """
     raise NotImplementedError
-    
+
+
+class WeightFnCacher(nn.Module, Generic[T], abc.ABC):
+  """Interface for weight function cachers.
+
+  A weight function cacher prepares static data that may require expensive
+  computational work. For example: the context state embeddings used by
+  JointWeightFn can be from running an RNN on n-gram label sequences
+  """
+
+  @abc.abstractmethod
+  def forward(self) -> T:
+    """Builds the cached data."""
+  
