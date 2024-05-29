@@ -113,3 +113,22 @@ def hat_normalize(blank: torch.Tensor,
   normalized_blank = blank - z
   normalized_lexical = F.log_softmax(lexical) - torch.unsqueeze(z, -1) 
   return normalized_blank, normalized_lexical
+
+
+def log_softmax_normalize(
+    blank: torch.Tensor,
+    lexical: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+  """Standard log-softmax local normalization.
+
+  Weights are concatenated and then normalized together.
+
+  Args:
+    blank: [batch_dims...] blank weight.
+    lexical: [batch_dims..., vocab_size] lexical weights.
+
+  Returns:
+    Normalized (blank, lexical) weights.
+  """
+  all_weights = torch.concatenate([torch.unsqueeze(blank, -1), lexical], dim=-1)
+  all_weights = F.log_softmax(all_weights)
+  return all_weights[..., 0], all_weights[..., 1]
