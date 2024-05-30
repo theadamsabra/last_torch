@@ -39,3 +39,23 @@ class WeightFnTets(absltest.TestCase):
         actual_blank, actual_lexical = weight_fns.log_softmax_normalize(blank, lexical)
         npt.assert_allclose(actual_blank, expect_blank, rtol=1e-3, atol=1e-6)
         npt.assert_allclose(actual_lexical, expect_lexical, rtol=1e-3, atol=1e-6)
+
+
+class JointWeightFnTest(absltest.TestCase):
+
+  def test_call(self):
+    weight_fn = weight_fns.JointWeightFn(vocab_size=3, hidden_size=8)
+    frame = torch.rand((2, 4))
+    cache = torch.rand((6, 5))  # context embeddings.
+    
+    with self.subTest('all context states'):
+      blank, lexical = weight_fn(cache, frame)
+      npt.assert_equal(blank.shape, (2, 6))
+      npt.assert_equal(lexical.shape, (2, 6, 3))
+
+    # TODO: Add per state calculation with assert all close
+    with self.subTest('per-state shapes'):
+      state = torch.Tensor([2, 4])
+      blank_per_state, lexical_per_state = weight_fn(cache, frame, state)
+      npt.assert_equal(blank_per_state.shape, (2,))
+      npt.assert_equal(lexical_per_state.shape, (2,3))

@@ -152,9 +152,13 @@ class LocallyNormalizedWeightFn(WeightFn[T]):
     normalize: Callable that produces normalized log-probabilities from (blank,
       lexical) weights, e.g. hat_normalize() or log_softmax_normalize().
   """
-  weight_fn: WeightFn[T]
-  normalize: Callable[[torch.Tensor, torch.Tensor],
-                      tuple[torch.Tensor, torch.Tensor]] = hat_normalize
+  def __init__(self, weight_fn: WeightFn[T], 
+               normalize: Callable[[torch.Tensor, torch.Tensor],
+                      tuple[torch.Tensor, torch.Tensor]] = hat_normalize,
+               *args, **kwargs) -> None:
+    super().__init__(*args, **kwargs)
+    self.weight_fn = weight_fn
+    self.normalize = normalize
 
   def forward(
       self,
@@ -178,8 +182,12 @@ class JointWeightFn(WeightFn[torch.Tensor]):
       i.e. $|\Sigma|$.
     hidden_size: Hidden layer size.
   """
-  vocab_size: int
-  hidden_size: int
+  def __init__(self, vocab_size: int, hidden_size: int, 
+               device: Optional[str] = 'cpu', *args, **kwargs) -> None:
+    super().__init__(*args, **kwargs)
+    self.vocab_size = vocab_size
+    self.hidden_size = hidden_size
+    self.device = device
 
   def forward(
       self,
@@ -187,21 +195,31 @@ class JointWeightFn(WeightFn[torch.Tensor]):
       frame: torch.Tensor,
       state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
     context_embeddings = cache
+    context_embeddings.to(self.device)
+
     if state is None:
-      # TODO: Intentionally breaking this code to debug in testing:
-      frame = frame[..., torch.newaxis, :]
+      frame = torch.unsqueeze(frame, 1) 
     else:
-      context_embeddings = context_embeddings[state]
+      context_embeddings = torch.index_select(context_embeddings, dim=0,
+                                              index=state.long())
+
+    context_projection = nn.Linear(context_embeddings.shape[-1], 
+                                   self.hidden_size, bias=False, device=self.device)
+    blank_projection = nn.Linear(frame.shape[-1], self.hidden_size,
+                                 bias=False, device=self.device)
+
     # TODO: will follow the projection as shown in the JAX implementation.
-    # Speak to Ke later if changes are made.
-    # Will also debug during testing for in_features parameter:
-    projected_context_embeddings = nn.Linear(
-      in_features=self.hidden_size,
-      out_features=self.hidden_size,
-      bias=False
-    )(context_embeddings)
-    projected_frame = nn.Linear(
-      in_features=self.hidden_size,
-      out_features=self.hidden_size,
-      bias=False
-    )(frame)
+    # Speak to Ke later if changes are made and track as needed.
+    projected_context_embeddings = context_projection(context_embeddings)
+    projected_frame = blank_projection(frame)
+
+    joint = F.tanh(projected_context_embeddings + projected_frame)
+
+    joint_projection_to_blank = nn.Linear(joint.shape[-1], 1, device=self.device)
+    joint_projection_to_vocab = nn.Linear(joint.shape[-1], self.vocab_size, device=self.device)
+
+    blank = torch.squeeze(
+      joint_projection_to_blank(joint), dim=-1
+    )
+    lexical = joint_projection_to_vocab(joint)
+    return blank, lexical
