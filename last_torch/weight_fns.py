@@ -130,8 +130,8 @@ def log_softmax_normalize(
     Normalized (blank, lexical) weights.
   """
   all_weights = torch.concatenate([torch.unsqueeze(blank, -1), lexical], dim=-1)
-  all_weights = F.log_softmax(all_weights)
-  return all_weights[..., 0], all_weights[..., 1]
+  all_weights = F.log_softmax(all_weights, dim=-1)
+  return all_weights[..., 0], all_weights[..., 1:]
 
 
 class LocallyNormalizedWeightFn(WeightFn[T]):

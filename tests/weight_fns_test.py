@@ -30,3 +30,12 @@ class WeightFnTets(absltest.TestCase):
         actual_blank, actual_lexical = weight_fns.hat_normalize(blank, lexical)
         npt.assert_allclose(actual_blank, expect_blank, rtol=1e-3, atol=1e-6)
         npt.assert_allclose(actual_lexical, expect_lexical, rtol=1e-3, atol=1e-6)
+    
+    def test_log_softmax_normalize(self):
+        blank = torch.Tensor([2, 7])
+        lexical = torch.Tensor([[0, 1], [3, 5]])
+        expect_blank = torch.Tensor([-0.407606, -0.142932])
+        expect_lexical = torch.Tensor([[-2.407606, -1.407606], [-4.142932, -2.142932]])
+        actual_blank, actual_lexical = weight_fns.log_softmax_normalize(blank, lexical)
+        npt.assert_allclose(actual_blank, expect_blank, rtol=1e-3, atol=1e-6)
+        npt.assert_allclose(actual_lexical, expect_lexical, rtol=1e-3, atol=1e-6)
