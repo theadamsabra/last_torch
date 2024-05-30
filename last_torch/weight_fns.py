@@ -111,7 +111,7 @@ def hat_normalize(blank: torch.Tensor,
   # Outside normalizer
   z = torch.log(1 + torch.exp(blank))
   normalized_blank = blank - z
-  normalized_lexical = F.log_softmax(lexical) - torch.unsqueeze(z, -1) 
+  normalized_lexical = F.log_softmax(lexical, dim=-1) - torch.unsqueeze(z, -1) 
   return normalized_blank, normalized_lexical
 
 
@@ -163,3 +163,45 @@ class LocallyNormalizedWeightFn(WeightFn[T]):
       state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
     blank, lexical = self.weight_fn(cache, frame, state)
     return self.normalize(blank, lexical)
+
+
+class JointWeightFn(WeightFn[torch.Tensor]):
+  r"""Common implementation of both the shared-emb and shared-rnn weight functions.
+
+  To use shared-emb weight functions, pair this with a SharedEmbCacher. To use
+  shared-rnn weight functions, pair this with a SharedRNNCacher. More generally,
+  this weight function works with any WeightFnCacher that produces a
+  [num_context_states, embedding_size] context embedding table.
+
+  Attributes:
+    vocab_size: Size of the lexical output vocabulary (not including the blank),
+      i.e. $|\Sigma|$.
+    hidden_size: Hidden layer size.
+  """
+  vocab_size: int
+  hidden_size: int
+
+  def forward(
+      self,
+      cache: torch.Tensor,
+      frame: torch.Tensor,
+      state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    context_embeddings = cache
+    if state is None:
+      # TODO: Intentionally breaking this code to debug in testing:
+      frame = frame[..., torch.newaxis, :]
+    else:
+      context_embeddings = context_embeddings[state]
+    # TODO: will follow the projection as shown in the JAX implementation.
+    # Speak to Ke later if changes are made.
+    # Will also debug during testing for in_features parameter:
+    projected_context_embeddings = nn.Linear(
+      in_features=self.hidden_size,
+      out_features=self.hidden_size,
+      bias=False
+    )(context_embeddings)
+    projected_frame = nn.Linear(
+      in_features=self.hidden_size,
+      out_features=self.hidden_size,
+      bias=False
+    )(frame)
