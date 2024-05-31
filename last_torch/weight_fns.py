@@ -223,3 +223,18 @@ class JointWeightFn(WeightFn[torch.Tensor]):
     )
     lexical = joint_projection_to_vocab(joint)
     return blank, lexical
+
+
+class SharedEmbCacher(WeightFnCacher[torch.Tensor]):
+  """A randomly initialized, independent context embedding table.
+
+  The result context embedding table can be used with JointWeightFn.
+  """
+  def __init__(self, num_context_states: int, embedding_size: int, device: Optional[str] = None, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.num_context_states = num_context_states
+    self.embedding_size = embedding_size
+    self.device = device if device else 'cpu'
+  
+  def forward(self) -> torch.Tensor:
+    return torch.nn.Embedding(self.num_context_states, self.embedding_size).to(self.device)
