@@ -70,6 +70,28 @@ def expected(op, x, y):
   expected_dx, expected_dy = expected_vjp_fn(torch.ones_like(expected_z))
   return expected_z, expected_dx, expected_dy
 
+def expected_grad(op, x, y):
+  l = lambda x, y: op(*torch.broadcast_tensors(x, y))  
+  return torch.gradient(l(x, y))[0]
+
+
+def binary_op_broadcasting_test_plus(semiring):
+  for op in [semiring.plus]:
+    for shapes in [
+        ([], [2]),
+        ([1], [2]),
+        ([1, 2], [3, 2]),
+        ([2, 1], [2, 3]),
+        ([3], [2, 3]),
+    ]:
+      for shape_x, shape_y in [shapes, shapes[::-1]]:
+        err_msg = f'op={op} shapes={(shape_x, shape_y)}'
+        x = semiring.ones(shape_x)
+        y = semiring.ones(shape_y)
+        z = torch.gradient(op(x, y))[0]
+        expected_z = expected_grad(op, x, y)
+        npt.assert_allclose(z, expected_z, err_msg=err_msg)
+
 
 def binary_op_broadcasting_test_times(semiring):
   # TODO: implement for broadcasting test plus
@@ -179,6 +201,7 @@ class LogTest(absltest.TestCase):
         semirings.Log.sum(torch.Tensor([2, 3]), dim=0), 3.31326169)
     zero_and_one_test(semirings.Log)
     binary_op_broadcasting_test_times(semirings.Log)
+    binary_op_broadcasting_test_plus(semirings.Log)
 
 
 class MaxTropicalTest(absltest.TestCase):
@@ -198,6 +221,7 @@ class MaxTropicalTest(absltest.TestCase):
     )
     zero_and_one_test(semirings.MaxTropical)
     binary_op_broadcasting_test_times(semirings.MaxTropical)
+    binary_op_broadcasting_test_plus(semirings.MaxTropical)
 
   def test_plus_grad(self):
     fun = lambda a: torch.sum(semirings.MaxTropical.plus(a[0], a[1]))
