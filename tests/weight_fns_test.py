@@ -59,8 +59,11 @@ class JointWeightFnTest(absltest.TestCase):
       blank_per_state, lexical_per_state = weight_fn(cache, frame, state)
       npt.assert_equal(blank_per_state.shape, (2,))
       npt.assert_equal(lexical_per_state.shape, (2,3))
-  
-  def test_SharedEmbCacher(self):
+
+
+class SharedEmbCacher(absltest.TestCase):
+
+  def test_call(self):
     NUM_CONTEXT_STATES = 4
     EMBEDDING_SIZE = 5
     cacher = weight_fns.SharedEmbCacher(num_context_states=NUM_CONTEXT_STATES, embedding_size=EMBEDDING_SIZE)
