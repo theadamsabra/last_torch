@@ -16,9 +16,11 @@
 
 import abc
 import torch
+import einops
 
 from typing import Generic, TypeVar, Optional, Callable
 from torch import nn
+from torch.utils._pytree import tree_map
 from torch.nn import functional as F
 
 # Weight functions are the only components in GNAT with trainable parameters. We
@@ -238,3 +240,55 @@ class SharedEmbCacher(WeightFnCacher[torch.Tensor]):
   
   def forward(self) -> torch.Tensor:
     return torch.nn.Embedding(self.num_context_states, self.embedding_size).to(self.device)
+  
+
+class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
+  """Builds a context embedding table by running n-gram context labels through an RNN.
+
+  This is usually used with last.contexts.FullNGram, where num_context_states =
+  sum(vocab_size**i for i in range(context_size + 1)). The result context
+  embedding table can be used with JointWeightFn.
+  """
+  def __init__(self, vocab_size: int, context_size: int, rnn_size: int, rnn_embedding_size:int,
+               rnn_cell: Optional[nn.RNNCellBase] = None, *args, **kwargs):
+    super().__init__(*args, **kwargs)
+    self.vocab_size = vocab_size
+    self.context_size = context_size
+    self.rnn_size = rnn_size
+    self.rnn_embedding_size = rnn_embedding_size
+    self.rnn_cell = rnn_cell
+
+  def _tile_rnn_state(self, state):
+    return einops.repeat(state, 'n ... -> (n v) ...', v = self.vocab_size)
+
+  def forward(self) -> torch.Tensor:
+    if self.rnn_cell is None:
+      rnn_cell = nn.LSTMCell(self.rnn_embedding_size, self.rnn_size)
+    else:
+      rnn_cell = self.rnn_cell
+
+    feed_cell_state = rnn_cell._get_name() == 'LSTMCell'
+
+    embed = nn.Embedding(self.vocab_size + 1, self.rnn_embedding_size)
+    hidden_state, cell_state = rnn_cell(embed(torch.Tensor([0]).long()))
+    parts = [cell_state]
+    inputs = None
+    for i in range(self.context_size):
+      if i == 0:
+        inputs = embed(torch.arange(1, self.vocab_size + 1))
+      else:
+        inputs = einops.repeat(inputs, 'n ... -> (v n) ...', v=self.vocab_size)
+
+      tiled_hidden = tree_map(self._tile_rnn_state, hidden_state) 
+      if feed_cell_state:
+        tiled_cell_state = tree_map(self._tile_rnn_state, cell_state)
+        hidden_state, cell_state = rnn_cell(
+          inputs, (tiled_hidden, tiled_cell_state)
+        )
+      else:
+        hidden_state, cell_state = rnn_cell(
+          inputs, tiled_hidden 
+        )
+      parts.append(cell_state)
+    
+    return torch.concatenate(parts, axis=0)
