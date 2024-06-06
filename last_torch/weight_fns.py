@@ -292,3 +292,51 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
       parts.append(cell_state)
     
     return torch.concatenate(parts, axis=0)
+
+
+class NullCacher(WeightFnCacher[type(None)]):
+  """A cacher that simply returns None.
+
+  Mainly used with TableWeightFn for unit testing.
+  """
+
+  def forward(self) -> None:
+    return None
+
+
+class TableWeightFn(WeightFn[type(None)]):
+  """Weight function that looks up a fixed table, useful for testing.
+
+  Attributes:
+    table: [batch_dims..., input_vocab_size, num_context_states, 1 + vocab_size]
+      arc weight table. For each input frame, we simply cast the 0-th element
+      into an integer "input label" and look up the corresponding weights. The
+      weights of blank arcs are stored at `table[..., 0]`, and the weights of
+      lexical arcs at `table[..., 1:]`.
+  """
+  def __init__(self, table: torch.Tensor, *args, **kwargs) -> None:
+    super().__init__(*args, **kwargs)
+    self.table = table
+  
+  def forward(self, 
+              cache: None, 
+              frame: torch.Tensor,
+              state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
+    del cache
+
+    *batch_dims, input_vocab_size, num_context_states, _ = self.table.shape
+    if frame.shape[:-1] != tuple(batch_dims):
+      raise ValueError(f'frame should have batch_dims={tuple(batch_dims)} but '
+                       f'got {frame.shape[:-1]}')
+
+    frame_mask = F.one_hot(frame[..., 0].astype(torch.int32), input_vocab_size)
+    weights = torch.einsum('...xcy,...x->...cy', self.table, frame_mask)
+
+    if state is not None:
+      state = torch.broadcast_to(state, batch_dims)
+      state_mask = nn.one_hot(state, num_context_states)
+      weights = torch.einsum('...cy,...c->...y', weights, state_mask)
+
+    blank = weights[..., 0]
+    lexical = weights[..., 1:]
+    return blank, lexical
