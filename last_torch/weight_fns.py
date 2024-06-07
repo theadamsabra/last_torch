@@ -257,6 +257,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
     self.rnn_size = rnn_size
     self.rnn_embedding_size = rnn_embedding_size
     self.rnn_cell = rnn_cell
+    self.embedding = nn.Embedding(self.vocab_size + 1, self.rnn_embedding_size)
 
   def _tile_rnn_state(self, state):
     return einops.repeat(state, 'n ... -> (n v) ...', v = self.vocab_size)
@@ -269,13 +270,12 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
 
     feed_cell_state = rnn_cell._get_name() == 'LSTMCell'
 
-    embed = nn.Embedding(self.vocab_size + 1, self.rnn_embedding_size)
-    hidden_state, cell_state = rnn_cell(embed(torch.Tensor([0]).long()))
+    hidden_state, cell_state = rnn_cell(self.embedding(torch.Tensor([0]).long()))
     parts = [cell_state]
     inputs = None
     for i in range(self.context_size):
       if i == 0:
-        inputs = embed(torch.arange(1, self.vocab_size + 1))
+        inputs = self.embedding(torch.arange(1, self.vocab_size + 1))
       else:
         inputs = einops.repeat(inputs, 'n ... -> (v n) ...', v=self.vocab_size)
 
@@ -291,7 +291,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
         )
       parts.append(cell_state)
     
-    return torch.concatenate(parts, axis=0)
+    return torch.concatenate(parts, dim=0)
 
 
 class NullCacher(WeightFnCacher[type(None)]):
@@ -334,7 +334,7 @@ class TableWeightFn(WeightFn[type(None)]):
 
     if state is not None:
       state = torch.broadcast_to(state, batch_dims)
-      state_mask = nn.one_hot(state, num_context_states)
+      state_mask = F.one_hot(state, num_context_states)
       weights = torch.einsum('...cy,...c->...y', weights, state_mask)
 
     blank = weights[..., 0]

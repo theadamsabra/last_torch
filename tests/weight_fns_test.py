@@ -73,3 +73,79 @@ class SharedEmbCacher(absltest.TestCase):
     npt.assert_equal(embedding(idx).shape, 
                     (NUM_CONTEXT_STATES, EMBEDDING_SIZE)
                     )
+
+
+class SharedRNNCacher(absltest.TestCase):
+   
+   def test_call(self):
+      pad = -2
+      start = -1
+
+      class FakeRNNCell(torch.nn.RNNCellBase):
+        def __init__(self, input_size: int, hidden_size: int, bias: bool, num_chunks: int, device=None, dtype=None) -> None:
+            super().__init__(input_size, hidden_size, bias, num_chunks, device, dtype)
+
+        def forward(self, inputs, carry=None):
+            if carry == None:
+                carry = self.initialize_carry((1, self.hidden_size))
+
+            carry = torch.concat(([carry[..., 1:], inputs[..., :1]]), dim=-1)
+            return carry, carry
+
+        def initialize_carry(self, input_shape):
+            batch_dims = input_shape[:-1]
+            return torch.full((*batch_dims, self.hidden_size), pad)
+
+      with self.subTest('context_size=2'):
+        embeddings = torch.broadcast_to(torch.Tensor([start, 1, 2, 3]).unsqueeze(-1), (4,6))
+        cacher = weight_fns.SharedRNNCacher(
+           vocab_size=3,
+           context_size=2,
+           rnn_size=4,
+           rnn_embedding_size=6,
+           rnn_cell=FakeRNNCell(input_size=3, hidden_size=4, bias=False,
+                                num_chunks=1)
+        )
+        
+        # update embeddings
+        cacher.embedding = torch.nn.Embedding.from_pretrained(embeddings)
+
+        npt.assert_array_equal(
+            cacher(),
+            [
+                # Start.
+                [pad, pad, pad, start],
+                # Unigrams.
+                [pad, pad, start, 1],
+                [pad, pad, start, 2],
+                [pad, pad, start, 3],
+                # Bigrams.
+                [pad, start, 1, 1],
+                [pad, start, 1, 2],
+                [pad, start, 1, 3],
+                [pad, start, 2, 1],
+                [pad, start, 2, 2],
+                [pad, start, 2, 3],
+                [pad, start, 3, 1],
+                [pad, start, 3, 2],
+                [pad, start, 3, 3],
+            ],
+        )
+    
+      with self.subTest('context_size=0'):
+        cacher = weight_fns.SharedRNNCacher(
+            vocab_size=3,
+            context_size=0,
+            rnn_size=4,
+            rnn_embedding_size=6,
+            rnn_cell=FakeRNNCell(input_size=3, hidden_size=4, bias=False,
+                                num_chunks=1)
+        )
+
+        # update embeddings
+        cacher.embedding = torch.nn.Embedding.from_pretrained(embeddings)
+
+        npt.assert_array_equal(
+            cacher(),
+            [[pad, pad, pad, start]],
+        )
