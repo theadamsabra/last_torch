@@ -333,7 +333,7 @@ class TableWeightFn(WeightFn[type(None)]):
     weights = torch.einsum('...xcy,...x->...cy', self.table, frame_mask)
 
     if state is not None:
-      state = torch.broadcast_to(state, batch_dims)
+      state = torch.broadcast_to(state, batch_dims).to(torch.int64)
       state_mask = F.one_hot(state, num_context_states)
       weights = torch.einsum('...cy,...c->...y', weights, state_mask)
 
