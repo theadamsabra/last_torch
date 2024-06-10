@@ -82,6 +82,7 @@ class WeightFnTets(absltest.TestCase):
             ValueError, r'frame should have batch_dims=\(2,\) but got \(torch.Size\(\[1, 2\]\)\)'):
           weight_fn(None, frame.unsqueeze(0))
 
+
 class JointWeightFnTest(absltest.TestCase):
 
   def test_call(self):
