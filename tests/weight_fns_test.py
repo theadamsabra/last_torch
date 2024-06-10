@@ -45,6 +45,25 @@ class WeightFnTets(absltest.TestCase):
        cache = cacher()
        self.assertIsNone(cache)
 
+    def test_TableWeightFn(self):
+      with self.subTest('batch ndim = 0'):
+        table = torch.arange(5 * 4 * 3).reshape([5, 4, 3])
+        weight_fn = weight_fns.TableWeightFn(table)
+
+        frame = torch.Tensor([1., 2.])
+        blank, lexical = weight_fn(None, frame)
+        npt.assert_array_equal(blank, table[1, :, 0])
+        npt.assert_array_equal(lexical, table[1, :, 1:])
+
+        state = torch.tensor(3) 
+        blank, lexical = weight_fn(None, frame, state)
+        npt.assert_array_equal(blank, table[1, 3, 0])
+        npt.assert_array_equal(lexical, table[1, 3, 1:])
+
+        with self.assertRaisesRegex(
+            ValueError, r'frame should have batch_dims=\(\) but got \(torch.Size\(\[1\]\)\)'):
+            weight_fn(None, frame.unsqueeze(0))
+
 class JointWeightFnTest(absltest.TestCase):
 
   def test_call(self):

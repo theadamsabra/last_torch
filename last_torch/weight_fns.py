@@ -327,9 +327,9 @@ class TableWeightFn(WeightFn[type(None)]):
     *batch_dims, input_vocab_size, num_context_states, _ = self.table.shape
     if frame.shape[:-1] != tuple(batch_dims):
       raise ValueError(f'frame should have batch_dims={tuple(batch_dims)} but '
-                       f'got {frame.shape[:-1]}')
+                       f'got ({frame.shape[:-1]})')
 
-    frame_mask = F.one_hot(frame[..., 0].astype(torch.int32), input_vocab_size)
+    frame_mask = F.one_hot(frame[..., 0].to(torch.int64), input_vocab_size)
     weights = torch.einsum('...xcy,...x->...cy', self.table, frame_mask)
 
     if state is not None:
