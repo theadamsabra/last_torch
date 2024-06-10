@@ -40,6 +40,10 @@ class WeightFnTets(absltest.TestCase):
         npt.assert_allclose(actual_blank, expect_blank, rtol=1e-3, atol=1e-6)
         npt.assert_allclose(actual_lexical, expect_lexical, rtol=1e-3, atol=1e-6)
 
+    def test_NullCacher(self):
+       cacher = weight_fns.NullCacher()
+       cache = cacher()
+       self.assertIsNone(cache)
 
 class JointWeightFnTest(absltest.TestCase):
 
