@@ -132,3 +132,120 @@ class ContextDependency(abc.ABC):
     _, time_major_states = torch.scan(step, start, time_major_labels)
     states = torch.transpose(time_major_states, [*range(1, labels.ndim), 0])
     return torch.concatenate([torch.unsqueeze(start, dim=-1), states], dim=-1)
+
+
+@dataclasses.dataclass(frozen=True)
+class FullNGram(ContextDependency):
+  """Full n-gram context dependency as described in Section 4.1 of the GNAT paper.
+
+  For a given vocab_size > 0, context_size >= 0,
+  -   The set of states represents the set of all possible n-grams from length 0
+      to length context_size for an output vocabulary of vocab_size.
+  -   Each n-gram is assigned their lexicographic order as the id. The empty
+      n-gram is state 0, followed by the vocab_size unigrams as states 1 to
+      vocab_size, and so on.
+  -   The start state is 0 (the empty n-gram).
+  -   All states are final.
+  -   From each n-gram state, there is an arc for each label in the vocabulary
+      leading to the n-gram with the label appended to the end, with the length
+      of the n-gram capped at context_size.
+
+  Attributes:
+    vocab_size: Lexical output vocabulary size.
+    context_size: Maximum n-gram context size.
+  """
+
+  vocab_size: int
+  context_size: int
+
+  def __post_init__(self):
+    if self.vocab_size <= 0:
+      raise ValueError('vocab_size should be > 0, but got '
+                       f'vocab_size={self.vocab_size}')
+    if self.context_size < 0:
+      raise ValueError('context_size should be >= 0, but got '
+                       f'context_size={self.context_size}')
+
+  def num_states(self) -> int:
+    return sum(int(self.vocab_size ** i) for i in range(self.context_size + 1))
+  
+  def shape(self) -> tuple[int, int]:
+    return self.num_states(), self.vocab_size
+  
+  def start(self) -> int:
+    return 0
+  
+  def next_state(self, state: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+    num_ascending_states = sum(
+      self.vocab_size**i for i in range(self.context_size))
+    ascend_nextstate = state * self.vocab_size + label
+    if self.context_size == 0:
+      full_nextstate = torch.zeros_like(ascend_nextstate)
+    else:
+      full_nextstate = (
+        (state - num_ascending_states) %
+        (self.vocab_size**(self.context_size - 1)) * self.vocab_size +
+        num_ascending_states + label - 1)
+    nextstate = torch.where(state < num_ascending_states, ascend_nextstate,
+                            full_nextstate)
+    # Remain where we were for epsilons
+    nextstate = torch.where(label == 0, state, nextstate)
+    return nextstate
+  
+  def forward_reduce(self, weights: torch.Tensor, 
+                     semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    batch_dims = weights.shape[:-2]
+    if weights.shape[-2:] != self.shape():
+      raise ValueError(f'weights.shape[-2:] should be {self.shape()} but got'
+                       f' {weights.shape[-2:]}')
+
+    # weights can be partitioned into two blocks, those leading to
+    # ascending states, and those leading to the full context_size order states.
+    next_accum_parts = []
+    if self.context_size > 0:
+      next_accum_parts.append(semiring.zeros(batch_dims + (1,), weights.dtype))
+
+    num_states_going_into_ascending_states = sum(
+        self.vocab_size**i for i in range(0, self.context_size - 1))
+    next_accum_parts.append(weights[
+        ..., :num_states_going_into_ascending_states, :].reshape(batch_dims +
+                                                                 (-1,)))
+    next_accum_parts.append(
+        semiring.sum(
+            weights[..., num_states_going_into_ascending_states:, :].reshape(
+                batch_dims + (-1, self.vocab_size**self.context_size)),
+            dim=-2))
+    return torch.concatenate(next_accum_parts, dim=-1)
+  
+  def backward_broadcast(self, weights: torch.Tensor) -> torch.Tensor:
+    batch_dims = weights.shape[:-1]
+    num_states = weights.shape[-1]
+    if num_states != self.num_states():
+      raise ValueError(f'weights.shape[-1] should be {self.num_states()} but '
+                       f'got {num_states}')
+
+    if self.context_size == 0:
+      return torch.broadcast_to(weights.unsqueeze(-1),
+                              weights.shape + (self.vocab_size,))
+
+    # Non-start ascending states have a unique incoming arc, thus a unique
+    # incoming state.
+    num_ascending_states = sum(
+        self.vocab_size**i for i in range(self.context_size))
+    part_a = weights[..., 1:num_ascending_states].reshape(batch_dims +
+                                                          (-1, self.vocab_size))
+
+    # States with arcs into full context_size order states.
+    part_b = torch.broadcast_to(
+        weights[..., None, num_ascending_states:], batch_dims +
+        (1 + self.vocab_size, self.vocab_size**
+         self.context_size)).reshape(batch_dims + (-1, self.vocab_size))
+
+    return torch.concatenate([part_a, part_b], dim=-2)
+  
+  def next_state_table(self) -> torch.Tensor:
+    """Generates the next state table (see NextStateTable)."""
+    num_states, vocab_size = self.shape()
+    return self.next_state(
+        torch.arange(num_states).unsqueeze(-1),
+        torch.arange(vocab_size).unsqueeze(0) + 1)
