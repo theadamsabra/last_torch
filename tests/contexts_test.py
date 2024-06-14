@@ -124,3 +124,36 @@ class FullNGramTest(absltest.TestCase):
         npt.assert_array_equal(
             context.backward_broadcast(torch.arange(3).reshape((1, 1, 3))),
             [[[[1, 2], [1, 2], [1, 2]]]])
+
+    def test_context_size_2_basics(self):
+        context = contexts.FullNGram(vocab_size=3, context_size=2)
+        self.assertEqual(context.num_states(), 13)
+        self.assertEqual(context.shape(), (13, 3))
+        self.assertEqual(context.start(), 0)
+
+    def test_context_size_2_next_state(self):
+        context = contexts.FullNGram(vocab_size=3, context_size=2)
+        npt.assert_array_equal(
+            context.next_state(
+                torch.Tensor([0, 1, 3, 4, 12]), torch.Tensor([1, 2, 3, 1, 2])),
+            [1, 5, 12, 4, 11])
+        # Epsilon transitions.
+        npt.assert_array_equal(
+            context.next_state(
+                torch.Tensor([0, 1, 3, 4, 12]), torch.Tensor([0, 0, 0, 0, 0])),
+            [0, 1, 3, 4, 12])
+
+    def test_context_size_2_forward_reduce(self):
+        context = contexts.FullNGram(vocab_size=3, context_size=2)
+        npt.assert_array_equal(
+            context.forward_reduce(
+                torch.arange(39).reshape((1, 13, 3)), semirings.Real), [[
+                    0, 0, 1, 2, 3 * 4 + 54, 4 * 4 + 54, 5 * 4 + 54, 6 * 4 + 54,
+                    7 * 4 + 54, 8 * 4 + 54, 9 * 4 + 54, 10 * 4 + 54, 11 * 4 + 54
+                ]])
+
+    def test_context_size_2_backward_broadcast(self):
+        context = contexts.FullNGram(vocab_size=3, context_size=2)
+        npt.assert_array_equal(
+            context.backward_broadcast(torch.arange(13).reshape((1, 13))),
+            [[[1, 2, 3]] + [[4, 5, 6], [7, 8, 9], [10, 11, 12]] * 4])
