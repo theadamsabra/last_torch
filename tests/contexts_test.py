@@ -79,3 +79,48 @@ class FullNGramTest(absltest.TestCase):
         npt.assert_array_equal(
             context.backward_broadcast(torch.Tensor([[[1], [2]]])),
             [[[[1, 1, 1]], [[2, 2, 2]]]]) 
+    
+    def test_context_size_1_basics(self):
+        context = contexts.FullNGram(vocab_size=2, context_size=1)
+        self.assertEqual(context.num_states(), 3)
+        self.assertEqual(context.shape(), (3, 2))
+        self.assertEqual(context.start(), 0)
+
+    def test_context_size_1_next_state(self):
+        context = contexts.FullNGram(vocab_size=2, context_size=1)
+        npt.assert_array_equal(context.next_state(torch.tensor(0), torch.tensor(1)), 1)
+        npt.assert_array_equal(
+            context.next_state(torch.Tensor([0, 1, 2]), torch.Tensor([1, 2, 1])),
+            [1, 2, 1])
+        npt.assert_array_equal(
+            context.next_state(torch.Tensor([[0, 1, 2]]), torch.Tensor([[1, 2, 1]])),
+            [[1, 2, 1]])
+        # Epsilon transitions.
+        npt.assert_array_equal(
+            context.next_state(torch.Tensor([0, 1, 2]), torch.Tensor([0, 0, 0])),
+            [0, 1, 2])
+
+    def test_context_size_1_forward_reduce(self):
+        context = contexts.FullNGram(vocab_size=2, context_size=1)
+        npt.assert_array_equal(
+            context.forward_reduce(torch.arange(6).reshape((3, 2)), semirings.Real),
+            [0, 0 + 2 + 4, 1 + 3 + 5])
+        npt.assert_array_equal(
+            context.forward_reduce(
+                torch.arange(6).reshape((1, 3, 2)), semirings.Real),
+            [[0, 0 + 2 + 4, 1 + 3 + 5]])
+        npt.assert_array_equal(
+            context.forward_reduce(
+                torch.arange(6).reshape((1, 1, 3, 2)), semirings.Real),
+            [[[0, 0 + 2 + 4, 1 + 3 + 5]]]) 
+    
+    def test_context_size_1_backward_broadcast(self):
+        context = contexts.FullNGram(vocab_size=2, context_size=1)
+        npt.assert_array_equal(
+            context.backward_broadcast(torch.arange(3)), [[1, 2], [1, 2], [1, 2]])
+        npt.assert_array_equal(
+            context.backward_broadcast(torch.arange(3).reshape((1, 3))),
+            [[[1, 2], [1, 2], [1, 2]]])
+        npt.assert_array_equal(
+            context.backward_broadcast(torch.arange(3).reshape((1, 1, 3))),
+            [[[[1, 2], [1, 2], [1, 2]]]])
