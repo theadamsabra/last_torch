@@ -157,3 +157,14 @@ class FullNGramTest(absltest.TestCase):
         npt.assert_array_equal(
             context.backward_broadcast(torch.arange(13).reshape((1, 13))),
             [[[1, 2, 3]] + [[4, 5, 6], [7, 8, 9], [10, 11, 12]] * 4])
+
+    def test_walk_states(self):
+        context = contexts.FullNGram(vocab_size=3, context_size=2)
+        self.assertEqual(
+            context.walk_states(torch.zeros([2, 3, 4], dtype=torch.int32)).shape,
+            (2, 3, 5))
+        npt.assert_array_equal(
+            context.walk_states(torch.Tensor([2, 3, 1])), [0, 2, 9, 10])
+        # Epsilon transitions.
+        npt.assert_array_equal(
+            context.walk_states(torch.Tensor([2, 0, 0, 3, 1])), [0, 2, 2, 2, 9, 10])

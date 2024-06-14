@@ -119,18 +119,30 @@ class ContextDependency(abc.ABC):
       i > 0 is the state after observing labels[..., i - 1].
     """
     batch_dims = labels.shape[:-1]
-    start = torch.broadcast_to(self.start(), batch_dims)
+    start = torch.broadcast_to(torch.tensor(self.start()), 
+                               batch_dims)
+
+    # Define custom scan specifially for next step:
+    def scan(f, init, xs):
+      carry = init
+      ys = torch.Tensor()
+      for x in xs:
+        carry, y = f(carry, x)
+        # Check if zero dimensional tensor to help with concatenation:
+        if (torch.numel(y) == 1) and (y.shape == torch.Size([])):
+          y = torch.unsqueeze(y, 0)
+
+        ys = torch.concatenate([ys, y])
+      return carry, ys.reshape(xs.shape)
 
     def step(state, label):
       next_state = self.next_state(state, label)
       return next_state, next_state
     
-    time_major_labels = torch.transpose(
+    time_major_labels = torch.permute(
       labels, [len(batch_dims), *range(len(batch_dims))])
-    # TODO: torch.scan is not a real function. will need to implement or find
-    # equivalent.
-    _, time_major_states = torch.scan(step, start, time_major_labels)
-    states = torch.transpose(time_major_states, [*range(1, labels.ndim), 0])
+    _, time_major_states = scan(step, start, time_major_labels)
+    states = torch.permute(time_major_states, [*range(1, labels.ndim), 0])
     return torch.concatenate([torch.unsqueeze(start, dim=-1), states], dim=-1)
 
 
