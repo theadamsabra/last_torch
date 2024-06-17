@@ -261,3 +261,65 @@ class FullNGram(ContextDependency):
     return self.next_state(
         torch.arange(num_states).unsqueeze(-1),
         torch.arange(vocab_size).unsqueeze(0) + 1)
+
+
+@dataclasses.dataclass(frozen=True)
+class NextStateTable(ContextDependency):
+  """Context dependency described as a transition lookup table.
+
+  Attributes:
+    next_state_table: [num_states, vocab_size] int32 array. next_state_table[p,
+      y - 1] is the state reached from p with label y.
+  """
+  next_state_table: torch.Tensor 
+
+  def __post_init__(self):
+    if self.next_state_table.ndim != 2:
+      raise ValueError(
+          'next_state_table should have shape [num_states, vocab_size], but'
+          f'got shape {self.next_state_table.shape}')
+    if self.next_state_table.size == 0:
+      raise ValueError('next_state_table should have a non-zero size, but '
+                       f'got shape {self.next_state_table.shape}')
+    if self.next_state_table.dtype != torch.int32:
+      raise ValueError('next_state_table should be an int32 ndarray, but '
+                       f'got dtype {self.next_state_table.dtype}')
+  
+  def shape(self) -> tuple[int, int]:
+    return self.next_state_table.shape
+  
+  def start(self) -> int:
+    return 0
+  
+  def next_state(self, state: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
+    # Note: lexical labels are in the range [1, vocab_size].
+    is_epsilon = label == 0
+    zero_based_label = torch.where(is_epsilon, 0, label - 1)
+    nextstate = self.next_state_table[state, zero_based_label]
+    # Remain where we were for epsilons.
+    nextstate = torch.where(is_epsilon, state, nextstate)
+    return nextstate
+  
+  def forward_reduce(self, weights: torch.Tensor,
+                     semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    batch_dims = weights.shape[:-2]
+    if weights.shape[-2:] != self.shape():
+      raise ValueError(f'weights.shape[-2:] should be {self.shape()} but got'
+                       f' {weights.shape[-2:]}')
+    num_states, _ = self.shape()
+    # Build the scatter operation.
+    operand = semiring.zeros(batch_dims + (num_states,), weights.dtype)
+    updates = weights
+    scatter_indices = torch.expand_dims(self.next_state_table, axis=-1)
+    update_window_dims = tuple(range(len(batch_dims)))
+    inserted_window_dims = (len(batch_dims),)
+    scatter_dims_to_operand_dims = (len(batch_dims),)
+    # TODO: Intentionally break for debugging
+    return torch.scatter_reduce()
+  
+  def backward_broadcast(self, weights: torch.Tensor) -> torch.Tensor:
+    num_states = weights.shape[-1]
+    if num_states != self.shape()[0]:
+      raise ValueError(f'weights.shape[-1] should be {self.shape()[0]} but '
+                       f'got {num_states}')
+    return weights[..., self.next_state_table]
