@@ -168,3 +168,20 @@ class FullNGramTest(absltest.TestCase):
         # Epsilon transitions.
         npt.assert_array_equal(
             context.walk_states(torch.Tensor([2, 0, 0, 3, 1])), [0, 2, 2, 2, 9, 10])
+
+
+class NextStateTableTest(absltest.TestCase):
+
+  def test_invalid_args(self):
+    with self.assertRaisesRegex(ValueError,
+                                'next_state_table should have a non-zero size'):
+      contexts.NextStateTable(torch.zeros([1, 0], dtype=torch.int32))
+    with self.assertRaisesRegex(ValueError,
+                                'next_state_table should have a non-zero size'):
+      contexts.NextStateTable(torch.zeros([0, 1], dtype=torch.int32))
+    with self.assertRaisesRegex(ValueError,
+                                'next_state_table should have shape'):
+      contexts.NextStateTable(torch.zeros([1], dtype=torch.int32))
+    with self.assertRaisesRegex(ValueError,
+                                'next_state_table should be an int32 ndarray'):
+      contexts.NextStateTable(torch.zeros([2, 3]))
