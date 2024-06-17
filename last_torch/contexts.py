@@ -278,7 +278,7 @@ class NextStateTable(ContextDependency):
       raise ValueError(
           'next_state_table should have shape [num_states, vocab_size], but'
           f'got shape {self.next_state_table.shape}')
-    if self.next_state_table.size == 0:
+    if 0 in self.next_state_table.size():
       raise ValueError('next_state_table should have a non-zero size, but '
                        f'got shape {self.next_state_table.shape}')
     if self.next_state_table.dtype != torch.int32:
