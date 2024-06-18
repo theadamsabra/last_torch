@@ -295,7 +295,7 @@ class NextStateTable(ContextDependency):
     # Note: lexical labels are in the range [1, vocab_size].
     is_epsilon = label == 0
     zero_based_label = torch.where(is_epsilon, 0, label - 1)
-    nextstate = self.next_state_table[state, zero_based_label]
+    nextstate = self.next_state_table[state.long(), zero_based_label.long()]
     # Remain where we were for epsilons.
     nextstate = torch.where(is_epsilon, state, nextstate)
     return nextstate

@@ -185,3 +185,24 @@ class NextStateTableTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError,
                                 'next_state_table should be an int32 ndarray'):
       contexts.NextStateTable(torch.zeros([2, 3]))
+    
+  def test_from_full_n_gram(self):
+    next_state_table = contexts.FullNGram(
+        vocab_size=3, context_size=2).next_state_table()
+    self.assertEqual(next_state_table.shape, (13, 3))
+    context = contexts.NextStateTable(next_state_table.to(torch.int32))
+
+    with self.subTest('basics'):
+       self.assertEqual(context.shape(), (13,3))
+       self.assertEqual(context.start(), 0)
+    
+    with self.subTest('next_state'):
+      npt.assert_array_equal(
+          context.next_state(
+              torch.Tensor([0, 1, 3, 4, 12]), torch.Tensor([1, 2, 3, 1, 2])),
+          [1, 5, 12, 4, 11])
+      # Epsilon transitions.
+      npt.assert_array_equal(
+          context.next_state(
+              torch.Tensor([0, 1, 3, 4, 12]), torch.Tensor([0, 0, 0, 0, 0])),
+          [0, 1, 3, 4, 12])
