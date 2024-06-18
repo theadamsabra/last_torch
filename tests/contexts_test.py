@@ -206,3 +206,35 @@ class NextStateTableTest(absltest.TestCase):
           context.next_state(
               torch.Tensor([0, 1, 3, 4, 12]), torch.Tensor([0, 0, 0, 0, 0])),
           [0, 1, 3, 4, 12])
+    
+    # TODO: Debug scatter reduce. Might need to implement from scratch:
+    # with self.subTest('forward_reduce'):
+    #   npt.assert_array_equal(
+    #       context.forward_reduce(
+    #           torch.arange(39).reshape((1, 13, 3)), semirings.Real), [[
+    #               0, 0, 1, 2, 3 * 4 + 54, 4 * 4 + 54, 5 * 4 + 54, 6 * 4 + 54,
+    #               7 * 4 + 54, 8 * 4 + 54, 9 * 4 + 54, 10 * 4 + 54, 11 * 4 + 54
+    #           ]])
+
+    with self.subTest('backward_broadcast'):
+      npt.assert_array_equal(
+          context.backward_broadcast(torch.arange(13).reshape((1, 13))),
+          [[[1, 2, 3]] + [[4, 5, 6], [7, 8, 9], [10, 11, 12]] * 4])
+
+    with self.subTest('walk_states'):
+      self.assertEqual(
+          context.walk_states(torch.zeros([2, 3, 4], dtype=torch.int32)).shape,
+          (2, 3, 5))
+      npt.assert_array_equal(
+          context.walk_states(torch.Tensor([2, 3, 1])), [0, 2, 9, 10])
+      # Epsilon transitions.
+      npt.assert_array_equal(
+          context.walk_states(torch.Tensor([2, 0, 0, 3, 1])), [0, 2, 2, 2, 9, 10])
+
+    with self.subTest('invalid inputs'):
+      with self.assertRaisesRegex(ValueError,
+                                  r'weights\.shape\[-2:\] should be torch.Size\(\[13, 3\]\)'):
+        context.forward_reduce(torch.zeros([4, 3]), semirings.Real)
+      with self.assertRaisesRegex(ValueError,
+                                  r'weights\.shape\[-1\] should be 13'):
+        context.backward_broadcast(torch.zeros([4]))

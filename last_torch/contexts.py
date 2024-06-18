@@ -310,12 +310,18 @@ class NextStateTable(ContextDependency):
     # Build the scatter operation.
     operand = semiring.zeros(batch_dims + (num_states,), weights.dtype)
     updates = weights
-    scatter_indices = torch.expand_dims(self.next_state_table, axis=-1)
+    scatter_indices = torch.unsqueeze(self.next_state_table, dim=-1)
     update_window_dims = tuple(range(len(batch_dims)))
     inserted_window_dims = (len(batch_dims),)
     scatter_dims_to_operand_dims = (len(batch_dims),)
     # TODO: Intentionally break for debugging
-    return torch.scatter_reduce()
+    print(operand.shape)
+    print(update_window_dims)
+    print(inserted_window_dims)
+    print(scatter_dims_to_operand_dims)
+    print(scatter_indices.shape)
+    return torch.scatter_reduce(operand, -1, scatter_indices.to(torch.int64),
+                                updates, 'prod')
   
   def backward_broadcast(self, weights: torch.Tensor) -> torch.Tensor:
     num_states = weights.shape[-1]
