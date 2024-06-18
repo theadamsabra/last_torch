@@ -315,11 +315,6 @@ class NextStateTable(ContextDependency):
     inserted_window_dims = (len(batch_dims),)
     scatter_dims_to_operand_dims = (len(batch_dims),)
     # TODO: Intentionally break for debugging
-    print(operand.shape)
-    print(update_window_dims)
-    print(inserted_window_dims)
-    print(scatter_dims_to_operand_dims)
-    print(scatter_indices.shape)
     return torch.scatter_reduce(operand, -1, scatter_indices.to(torch.int64),
                                 updates, 'prod')
   
