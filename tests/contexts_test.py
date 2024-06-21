@@ -207,14 +207,13 @@ class NextStateTableTest(absltest.TestCase):
               torch.Tensor([0, 1, 3, 4, 12]), torch.Tensor([0, 0, 0, 0, 0])),
           [0, 1, 3, 4, 12])
     
-    # TODO: Debug scatter reduce. Might need to implement from scratch:
-    # with self.subTest('forward_reduce'):
-    #   npt.assert_array_equal(
-    #       context.forward_reduce(
-    #           torch.arange(39).reshape((1, 13, 3)), semirings.Real), [[
-    #               0, 0, 1, 2, 3 * 4 + 54, 4 * 4 + 54, 5 * 4 + 54, 6 * 4 + 54,
-    #               7 * 4 + 54, 8 * 4 + 54, 9 * 4 + 54, 10 * 4 + 54, 11 * 4 + 54
-    #           ]])
+    with self.subTest('forward_reduce'):
+      npt.assert_array_equal(
+          context.forward_reduce(
+              torch.arange(39).reshape((1, 13, 3)), semirings.Real), [[
+                  0, 0, 1, 2, 3 * 4 + 54, 4 * 4 + 54, 5 * 4 + 54, 6 * 4 + 54,
+                  7 * 4 + 54, 8 * 4 + 54, 9 * 4 + 54, 10 * 4 + 54, 11 * 4 + 54
+              ]])
 
     with self.subTest('backward_broadcast'):
       npt.assert_array_equal(

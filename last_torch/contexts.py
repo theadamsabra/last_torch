@@ -306,17 +306,15 @@ class NextStateTable(ContextDependency):
     if weights.shape[-2:] != self.shape():
       raise ValueError(f'weights.shape[-2:] should be {self.shape()} but got'
                        f' {weights.shape[-2:]}')
-    num_states, _ = self.shape()
+    num_states, vocab_size = self.shape()
     # Build the scatter operation.
-    operand = semiring.zeros(batch_dims + (num_states,), weights.dtype)
+    operand = semiring.zeros(batch_dims + (num_states,) + (vocab_size,), weights.dtype)
     updates = weights
-    scatter_indices = torch.unsqueeze(self.next_state_table, dim=-1)
-    update_window_dims = tuple(range(len(batch_dims)))
-    inserted_window_dims = (len(batch_dims),)
-    scatter_dims_to_operand_dims = (len(batch_dims),)
-    # TODO: Intentionally break for debugging
-    return torch.scatter_reduce(operand, -1, scatter_indices.to(torch.int64),
-                                updates, 'prod')
+    scatter_indices = torch.unsqueeze(self.next_state_table, dim=0)
+    scatter_dims_to_operand_dims = len(batch_dims)
+    return operand.scatter_reduce(scatter_dims_to_operand_dims, 
+                                scatter_indices.to(torch.int64),
+                                updates, 'sum').max(dim=-1).values
   
   def backward_broadcast(self, weights: torch.Tensor) -> torch.Tensor:
     num_states = weights.shape[-1]
