@@ -246,3 +246,18 @@ def shift_down(x:torch.Tensor,
   """
   return torch.concatenate(
       [semiring.zeros((*x.shape[:-1], 1), x.dtype), x[..., :-1]], axis=-1)
+
+
+def check_num_weights(alignment: TimeSyncAlignmentLattice,
+                      blank: Sequence[torch.Tensor],
+                      lexical: Sequence[torch.Tensor]):
+    """Ensures that there are correct numbers of weight arrays."""
+    num_states = alignment.num_states()
+    if len(blank) != num_states:
+        raise ValueError(
+            f'blank should be a length {num_states} sequence of ndarrays, '
+            f'but got length {len(blank)}')
+    if len(lexical) != num_states:
+        raise ValueError(
+            f'lexical should be a length {num_states} sequence of ndarrays, '
+            f'but got length {len(lexical)}')
