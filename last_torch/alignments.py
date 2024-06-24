@@ -261,3 +261,69 @@ def check_num_weights(alignment: TimeSyncAlignmentLattice,
         raise ValueError(
             f'lexical should be a length {num_states} sequence of ndarrays, '
             f'but got length {len(lexical)}')
+
+
+class FrameDependent(TimeSyncAlignmentLattice):
+  """Frame dependent alignment lattice.
+
+  Each frame is aligned to either a lexical label or a blank label.
+  """
+  def num_states(self) -> int:
+    return 1
+
+  def start(self) -> int:
+    return 0
+
+  def blank_next(self, state: int) -> Optional[int]:
+    return 0
+
+  def lexical_next(self, state: int) -> Optional[int]:
+    return 0
+
+  def topological_visit(self) -> list[int]:
+    return [0]
+  
+  def forward(self, alpha:torch.Tensor, blank: Sequence[torch.Tensor],
+              lexical: Sequence[torch.Tensor],
+              context: contexts.ContextDependency,
+              semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    check_num_weights(self, blank, lexical)
+    # alpha: [batch_dims..., num_context_states]
+    # blank[0]: [batch_dims..., num_context_states]
+    # lexical[0]: [batch_dims..., num_context_states, vocab_size]
+    return semiring.plus(
+        semiring.times(alpha, blank[0]),
+        context.forward_reduce(
+            semiring.times(alpha.unsqueeze(-1), lexical[0]), semiring))
+
+
+  def backward(
+      self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
+      lexical: Sequence[torch.Tensor], beta: torch.Tensor, log_z: torch.Tensor,
+      context: contexts.ContextDependency
+  ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+    check_num_weights(self, blank, lexical)
+    # alpha: [batch_dims..., num_context_states]
+    # blank: [batch_dims..., num_context_states]
+    # lexical: [batch_dims..., num_context_states, vocab_size]
+    # beta: [batch_dims..., num_context_states]
+    # log_z: [batch_dims...]
+    blank_beta = blank[0] + beta
+    lexical_beta = lexical[0] + context.backward_broadcast(beta)
+    log_scale = alpha - log_z.unsqueeze(-1)
+    blank_marginal = torch.exp(blank_beta + log_scale)
+    lexical_marginal = torch.exp(lexical_beta + log_scale.unsqueeze(-1))
+    next_beta = semirings.Log.plus(blank_beta,
+                                   semirings.Log.sum(lexical_beta, axis=-1))
+    return next_beta, [blank_marginal], [lexical_marginal]
+
+  def string_forward(self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
+                     lexical: Sequence[torch.Tensor],
+                     semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    check_num_weights(self, blank, lexical)
+    # alpha: [batch_dims..., output_length + 1]
+    # blank: [batch_dims..., output_length + 1]
+    # lexical: [batch_dims..., output_length + 1]
+    return semiring.plus(
+        semiring.times(alpha, blank[0]),
+        shift_down(semiring.times(alpha, lexical[0]), semiring))
