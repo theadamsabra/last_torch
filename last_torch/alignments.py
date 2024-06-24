@@ -228,3 +228,21 @@ class TimeSyncAlignmentLattice(abc.ABC):
       [batch_dims..., output_length + 1] forward weights after observing the
       current frame.
     """
+
+
+def shift_down(x:torch.Tensor,
+               semiring:semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+  """Shifts values down by 1 position.
+
+  This is a useful helper function for implementing string_forward().
+
+  Args:
+    x: [batch_dims..., N] input values.
+    semiring: Semiring to use for filling in zero values.
+
+  Returns:
+    [batch_dims..., N] output values, where output[..., i + 1] = x[..., i] and
+    output[..., 0] = semiring zero.
+  """
+  return torch.concatenate(
+      [semiring.zeros((*x.shape[:-1], 1), x.dtype), x[..., :-1]], axis=-1)
