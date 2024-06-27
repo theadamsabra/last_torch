@@ -89,3 +89,81 @@ class FrameDependentTest(absltest.TestCase):
           lexical=[lexical, lexical],
           context=context,
           semiring=semirings.Real)
+
+  def test_backward(self):
+    context = contexts.FullNGram(vocab_size=2, context_size=1)
+    alignment = alignments.FrameDependent()
+    alpha = torch.rand([3])
+    blank = torch.rand([3])
+    lexical = torch.rand([3, 2])
+    beta = torch.rand([3])
+    z = torch.rand([])
+
+    # bakcward() always uses the log semiring
+
+    # Single.
+    log_next_beta, [blank_marginal], [lexical_marginal] = (
+        alignment.backward(
+            alpha=torch.log(alpha),
+            blank=[torch.log(blank)],
+            lexical=[torch.log(lexical)],
+            beta=torch.log(beta),
+            log_z=torch.log(z),
+            context=context))
+    next_beta = torch.exp(log_next_beta)
+    npt.assert_allclose(
+        next_beta, [
+            blank[0] * beta[0] + lexical[0, 0] * beta[1] +
+            lexical[0, 1] * beta[2],
+            blank[1] * beta[1] + lexical[1, 0] * beta[1] +
+            lexical[1, 1] * beta[2],
+            blank[2] * beta[2] + lexical[2, 0] * beta[1] +
+            lexical[2, 1] * beta[2],
+        ],
+        rtol=1e-4)
+    npt.assert_allclose(blank_marginal, alpha * blank * beta / z, rtol=1e-4)
+    npt.assert_allclose(
+        lexical_marginal, [
+            [
+                alpha[0] * lexical[0, 0] * beta[1] / z,
+                alpha[0] * lexical[0, 1] * beta[2] / z
+            ],
+            [
+                alpha[1] * lexical[1, 0] * beta[1] / z,
+                alpha[1] * lexical[1, 1] * beta[2] / z
+            ],
+            [
+                alpha[2] * lexical[2, 0] * beta[1] / z,
+                alpha[2] * lexical[2, 1] * beta[2] / z
+            ],
+        ],
+        rtol=1e-4)
+
+    # Batched.
+    batched_log_next_beta, _, _ = (
+        alignment.backward(
+            alpha=torch.log(alpha).unsqueeze(0),
+            blank=[torch.log(blank).unsqueeze(0)],
+            lexical=[torch.log(lexical).unsqueeze(0)],
+            beta=torch.log(beta).unsqueeze(0),
+            log_z=torch.log(z).unsqueeze(0),
+            context=context))
+    npt.assert_allclose(batched_log_next_beta, log_next_beta.unsqueeze(0))
+
+    # Wrong number of weights.
+    with self.assertRaisesRegex(ValueError, 'blank should be'):
+      alignment.backward(
+          alpha=alpha,
+          blank=[blank, blank],
+          lexical=[lexical],
+          beta=beta,
+          log_z=z,
+          context=context)
+    with self.assertRaisesRegex(ValueError, 'lexical should be'):
+      alignment.backward(
+          alpha=alpha,
+          blank=[blank],
+          lexical=[lexical, lexical],
+          beta=beta,
+          log_z=z,
+          context=context)

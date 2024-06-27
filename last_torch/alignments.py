@@ -314,7 +314,7 @@ class FrameDependent(TimeSyncAlignmentLattice):
     blank_marginal = torch.exp(blank_beta + log_scale)
     lexical_marginal = torch.exp(lexical_beta + log_scale.unsqueeze(-1))
     next_beta = semirings.Log.plus(blank_beta,
-                                   semirings.Log.sum(lexical_beta, axis=-1))
+                                   semirings.Log.sum(lexical_beta, dim=-1))
     return next_beta, [blank_marginal], [lexical_marginal]
 
   def string_forward(self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
