@@ -167,3 +167,41 @@ class FrameDependentTest(absltest.TestCase):
           beta=beta,
           log_z=z,
           context=context)
+
+  def test_string_forward(self):
+    alignment = alignments.FrameDependent()
+    alpha = torch.rand([4])
+    blank = torch.rand([4])
+    lexical = torch.rand([4])
+
+    # Single.
+    next_alpha = alignment.string_forward(
+        alpha=alpha, blank=[blank], lexical=[lexical], semiring=semirings.Real)
+    npt.assert_allclose(next_alpha, [
+        alpha[0] * blank[0],
+        alpha[1] * blank[1] + alpha[0] * lexical[0],
+        alpha[2] * blank[2] + alpha[1] * lexical[1],
+        alpha[3] * blank[3] + alpha[2] * lexical[2],
+    ])
+
+    # Batched.
+    batched_next_alpha = alignment.string_forward(
+        alpha=alpha.unsqueeze(0),
+        blank=[blank.unsqueeze(0)],
+        lexical=[lexical.unsqueeze(0)],
+        semiring=semirings.Real)
+    npt.assert_allclose(batched_next_alpha, next_alpha.unsqueeze(0))
+
+    # Wrong number of weights.
+    with self.assertRaisesRegex(ValueError, 'blank should be'):
+      alignment.string_forward(
+          alpha=alpha,
+          blank=[blank, blank],
+          lexical=[lexical],
+          semiring=semirings.Real)
+    with self.assertRaisesRegex(ValueError, 'lexical should be'):
+      alignment.string_forward(
+          alpha=alpha,
+          blank=[blank],
+          lexical=[lexical, lexical],
+          semiring=semirings.Real)
