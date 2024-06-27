@@ -35,3 +35,57 @@ class AlignmentsTest(absltest.TestCase):
         alignments.shift_down(
             torch.Tensor([[1, 2, 3], [4, 5, 6]]).to(torch.float32),
             semirings.Log), [[-torch.inf, 1, 2], [-torch.inf, 4, 5]])
+
+class FrameDependentTest(absltest.TestCase):
+
+  def test_topology(self):
+    alignment = alignments.FrameDependent()
+    self.assertEqual(alignment.num_states(), 1)
+    self.assertEqual(alignment.start(), 0)
+    self.assertEqual(alignment.blank_next(0), 0)
+    self.assertEqual(alignment.lexical_next(0), 0)
+    self.assertListEqual(alignment.topological_visit(), [0])
+
+  def test_forward(self):
+    context = contexts.FullNGram(vocab_size=2, context_size=1)
+    alignment = alignments.FrameDependent()
+    alpha = torch.rand([3])
+    blank = torch.rand([3])
+    lexical = torch.rand([3, 2])
+
+    # Single.
+    next_alpha = alignment.forward(
+        alpha=alpha,
+        blank=[blank],
+        lexical=[lexical],
+        context=context,
+        semiring=semirings.Real)
+    npt.assert_allclose(next_alpha, [
+        alpha[0] * blank[0],
+        alpha[1] * blank[1] + torch.sum(alpha * lexical[:, 0]),
+        alpha[2] * blank[2] + torch.sum(alpha * lexical[:, 1]),
+    ])
+    # Batched.
+    batched_next_alpha = alignment.forward(
+        alpha=alpha.unsqueeze(0),
+        blank=[blank.unsqueeze(0)],
+        lexical=[lexical.unsqueeze(0)],
+        context=context,
+        semiring=semirings.Real)
+    npt.assert_allclose(batched_next_alpha, next_alpha.unsqueeze(0))
+
+    # Wrong number of weights.
+    with self.assertRaisesRegex(ValueError, 'blank should be'):
+      alignment.forward(
+          alpha=alpha,
+          blank=[blank, blank],
+          lexical=[lexical],
+          context=context,
+          semiring=semirings.Real)
+    with self.assertRaisesRegex(ValueError, 'lexical should be'):
+      alignment.forward(
+          alpha=alpha,
+          blank=[blank],
+          lexical=[lexical, lexical],
+          context=context,
+          semiring=semirings.Real)
