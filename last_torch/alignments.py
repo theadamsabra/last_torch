@@ -327,3 +327,106 @@ class FrameDependent(TimeSyncAlignmentLattice):
     return semiring.plus(
         semiring.times(alpha, blank[0]),
         shift_down(semiring.times(alpha, lexical[0]), semiring))
+
+class FrameLabelDependent(TimeSyncAlignmentLattice):
+  """k-constrained frame-label-dependent alignment lattice.
+
+  Each frame is aligned to up to k lexical labels followed by a blank label.
+
+  Attributes:
+    max_expansions: The maximum number of lexical labels allowed per frame.
+  """
+  def __init__(self, max_expansions: int) -> None:
+    super().__init__()
+    self.max_expansions = max_expansions
+  
+  def num_states(self) -> int:
+    return self.max_expansions + 1
+   
+  def start(self) -> int:
+    return 0
+  
+  def blank_next(self, state: int) -> Optional[int]:
+    return 0
+
+  def lexical_next(self, state: int) -> Optional[int]:
+    next_state = state + 1
+    if next_state <= self.max_expansions:
+      return next_state
+    else:
+      return None
+  
+  def topological_visit(self) -> list[int]:
+    return list(range(self.max_expansions + 1))
+  
+  def forward(self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
+              lexical: Sequence[torch.Tensor],
+              context: contexts.ContextDependency,
+              semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    check_num_weights(self, blank, lexical)
+    # alpha: [batch_dims..., num_context_states]
+    # blank[i]: [batch_dims..., num_context_states]
+    # lexical[i]: [batch_dims..., num_context_states, vocab_size]
+    terminated = [semiring.times(alpha, blank[0])]
+    last = alpha
+    for i in range(self.max_expansions):
+      last = context.forward_reduce(
+        semiring.times(last.unsqueeze(-1), lexical[i]), semiring)
+      terminated.append(semiring.times(last, blank[i + 1]))
+    return semiring.sum(torch.stack(terminated), dim=0)
+  
+  def backward(
+      self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
+      lexical: Sequence[torch.Tensor], beta: torch.Tensor, log_z: torch.Tensor,
+      context: contexts.ContextDependency
+  ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+    check_num_weights(self, blank, lexical)
+    # alpha: [batch_dims..., num_context_states]
+    # blank[i]: [batch_dims..., num_context_states]
+    # lexcial[i]: [batch_dims..., num_context_states, vocab_size]
+    # beta: [batch_dims..., num_context_states]
+    # log_z: [batch_dims...]
+
+    lexical_alphas = [alpha]
+    last = alpha
+    for i in range(self.max_expansions):
+      last = context.forward_reduce(last.unsqueeze(-1) + lexical[i],
+                                    semirings.Log)
+      lexical_alphas.append(last)
+
+    # Corresponding backward paths.
+    blank_marginals = []
+    blank_log_scale = beta - log_z.unsqueeze(-1)
+    for i in range(self.max_expansions + 1):
+      blank_marginals.append(
+        torch.exp(lexical_alphas[i], + blank[i] + blank_log_scale)
+      )
+    
+    next_beta = blank[self.max_expansions] + beta
+    lexical_marginals = []
+    for i in range(self.max_expansions):
+      j = self.max_expansions - 1 - i
+      lexical_beta = (lexical[j] + context.backward_broadcast(next_beta))
+      log_scale = (lexical_alphas[j] - log_z.unsqueeze(-1))
+      lexical_marginals.append(
+        torch.exp(lexical_beta + log_scale.unsqueeze(-1))
+      )
+      next_beta = semirings.Log.plus(blank[j] + beta,
+                                     semirings.Log.sum(lexical_beta, dim=-1))
+    lexical_marginals.reverse()
+    lexical_marginals.append(torch.zeros_like(lexical[self.max_expansions]))
+    return next_beta, blank_marginals, lexical_marginals 
+
+  def string_forward(self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
+                     lexical: Sequence[torch.Tensor],
+                     semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    check_num_weights(self, blank, lexical)
+    # alpha: [batch_dims..., output_length + 1]
+    # blank[i]: [batch_dims..., output_length + 1]
+    # lexical[i]: [batch_dim..., output_length + 1]
+    terminated = [semiring.times(alpha, blank[0])]
+    last = alpha
+    for i in range(self.max_expansions):
+      last = shift_down(semiring.times(last, lexical[i]), semiring)
+      terminated.append(semiring.times(last, blank[i + 1]))
+    return semiring.sum(torch.stack(terminated), axis=0)
