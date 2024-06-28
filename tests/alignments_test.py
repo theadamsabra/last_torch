@@ -205,3 +205,6 @@ class FrameDependentTest(absltest.TestCase):
           blank=[blank],
           lexical=[lexical, lexical],
           semiring=semirings.Real)
+
+if __name__ == '__main__':
+  absltest.main()
