@@ -237,3 +237,6 @@ class NextStateTableTest(absltest.TestCase):
       with self.assertRaisesRegex(ValueError,
                                   r'weights\.shape\[-1\] should be 13'):
         context.backward_broadcast(torch.zeros([4]))
+
+if __name__ == '__main__':
+  absltest.main()
