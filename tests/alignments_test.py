@@ -206,5 +206,268 @@ class FrameDependentTest(absltest.TestCase):
           lexical=[lexical, lexical],
           semiring=semirings.Real)
 
+class FrameLabelDependentTest(absltest.TestCase):
+  
+  def test_topology(self):
+    alignment = alignments.FrameLabelDependent(max_expansions=2)
+    self.assertEqual(alignment.num_states(), 3)
+    self.assertEqual(alignment.start(), 0)
+    self.assertEqual(alignment.blank_next(0), 0)
+    self.assertEqual(alignment.blank_next(1), 0)
+    self.assertEqual(alignment.blank_next(2), 0)
+    self.assertEqual(alignment.lexical_next(0), 1)
+    self.assertEqual(alignment.lexical_next(1), 2)
+    self.assertIsNone(alignment.lexical_next(2))
+    self.assertListEqual(alignment.topological_visit(), [0, 1, 2])
+
+  def test_forward(self):
+    context = contexts.FullNGram(vocab_size=2, context_size=1)
+    alignment = alignments.FrameLabelDependent(max_expansions=2)
+    alpha = torch.rand([3])
+    blank = list(torch.rand([3, 3]))
+    lexical = list(torch.rand([3, 3, 2]))
+
+    # Single.
+    next_alpha = alignment.forward(
+        alpha=alpha,
+        blank=blank,
+        lexical=lexical,
+        context=context,
+        semiring=semirings.Real)
+    npt.assert_allclose(next_alpha, [
+        alpha[0] * blank[0][0],
+        alpha[0] * lexical[0][0, 0] * blank[1][1] +
+        alpha[0] * lexical[0][0, 0] * lexical[1][1, 0] * blank[2][1] +
+        alpha[0] * lexical[0][0, 1] * lexical[1][2, 0] * blank[2][1] +
+        alpha[1] * blank[0][1] + alpha[1] * lexical[0][1, 0] * blank[1][1] +
+        alpha[1] * lexical[0][1, 0] * lexical[1][1, 0] * blank[2][1] +
+        alpha[1] * lexical[0][1, 1] * lexical[1][2, 0] * blank[2][1] +
+        alpha[2] * lexical[0][2, 0] * blank[1][1] +
+        alpha[2] * lexical[0][2, 0] * lexical[1][1, 0] * blank[2][1] +
+        alpha[2] * lexical[0][2, 1] * lexical[1][2, 0] * blank[2][1],
+        alpha[0] * lexical[0][0, 0] * lexical[1][1, 1] * blank[2][2] +
+        alpha[0] * lexical[0][0, 1] * blank[1][2] +
+        alpha[0] * lexical[0][0, 1] * lexical[1][2, 1] * blank[2][2] +
+        alpha[1] * lexical[0][1, 0] * lexical[1][1, 1] * blank[2][2] +
+        alpha[1] * lexical[0][1, 1] * blank[1][2] +
+        alpha[1] * lexical[0][1, 1] * lexical[1][2, 1] * blank[2][2] +
+        alpha[2] * blank[0][2] +
+        alpha[2] * lexical[0][2, 0] * lexical[1][1, 1] * blank[2][2] +
+        alpha[2] * lexical[0][2, 1] * blank[1][2] +
+        alpha[2] * lexical[0][2, 1] * lexical[1][2, 1] * blank[2][2],
+    ], rtol=1e-5) #Increase tol as there is only one entry with 1e-5 diff.
+
+    # Batched.
+    batched_next_alpha = alignment.forward(
+        alpha=alpha.unsqueeze(0),
+        blank=[i.unsqueeze(0) for i in blank],
+        lexical=[i.unsqueeze(0) for i in lexical],
+        context=context,
+        semiring=semirings.Real)
+    npt.assert_allclose(batched_next_alpha, next_alpha.unsqueeze(0))
+
+    # Wrong number of weights.
+    with self.assertRaisesRegex(ValueError, 'blank should be'):
+      alignment.forward(
+          alpha=alpha,
+          blank=blank + blank,
+          lexical=lexical,
+          context=context,
+          semiring=semirings.Real)
+    with self.assertRaisesRegex(ValueError, 'lexical should be'):
+      alignment.forward(
+          alpha=alpha,
+          blank=blank,
+          lexical=lexical + lexical,
+          context=context,
+          semiring=semirings.Real)  
+
+  def test_backward(self):
+    context = contexts.FullNGram(vocab_size=2, context_size=1)
+    alignment = alignments.FrameLabelDependent(max_expansions=2)
+    alpha = torch.rand([3])
+    blank = list(torch.rand([3, 3]))
+    lexical = list(torch.rand([3, 3, 2]))
+    beta = torch.rand([3])
+    z = torch.rand([])
+
+    # backward() always uses the log semiring.
+
+    # Single.
+    log_next_beta, blank_marginals, lexical_marginals = (
+        alignment.backward(
+            alpha=torch.log(alpha),
+            blank=[torch.log(i) for i in blank],
+            lexical=[torch.log(i) for i in lexical],
+            beta=torch.log(beta),
+            log_z=torch.log(z),
+            context=context))
+    next_beta = torch.exp(log_next_beta)
+    npt.assert_allclose(
+        next_beta, [
+            blank[0][0] * beta[0] + lexical[0][0, 0] * blank[1][1] * beta[1] +
+            lexical[0][0, 0] * lexical[1][1, 0] * blank[2][1] * beta[1] +
+            lexical[0][0, 0] * lexical[1][1, 1] * blank[2][2] * beta[2] +
+            lexical[0][0, 1] * blank[1][2] * beta[2] +
+            lexical[0][0, 1] * lexical[1][2, 0] * blank[2][1] * beta[1] +
+            lexical[0][0, 1] * lexical[1][2, 1] * blank[2][2] * beta[2],
+            blank[0][1] * beta[1] + lexical[0][1, 0] * blank[1][1] * beta[1] +
+            lexical[0][1, 0] * lexical[1][1, 0] * blank[2][1] * beta[1] +
+            lexical[0][1, 0] * lexical[1][1, 1] * blank[2][2] * beta[2] +
+            lexical[0][1, 1] * blank[1][2] * beta[2] +
+            lexical[0][1, 1] * lexical[1][2, 0] * blank[2][1] * beta[1] +
+            lexical[0][1, 1] * lexical[1][2, 1] * blank[2][2] * beta[2],
+            blank[0][2] * beta[2] + lexical[0][2, 0] * blank[1][1] * beta[1] +
+            lexical[0][2, 0] * lexical[1][1, 0] * blank[2][1] * beta[1] +
+            lexical[0][2, 0] * lexical[1][1, 1] * blank[2][2] * beta[2] +
+            lexical[0][2, 1] * blank[1][2] * beta[2] +
+            lexical[0][2, 1] * lexical[1][2, 0] * blank[2][1] * beta[1] +
+            lexical[0][2, 1] * lexical[1][2, 1] * blank[2][2] * beta[2],
+        ],
+        rtol=1e-4)
+    npt.assert_allclose(
+        blank_marginals,
+        torch.Tensor([
+            [
+                alpha[0] * blank[0][0] * beta[0],
+                alpha[1] * blank[0][1] * beta[1],
+                alpha[2] * blank[0][2] * beta[2],
+            ],
+            [
+                0,
+                alpha[0] * lexical[0][0, 0] * blank[1][1] * beta[1] +
+                alpha[1] * lexical[0][1, 0] * blank[1][1] * beta[1] +
+                alpha[2] * lexical[0][2, 0] * blank[1][1] * beta[1],
+                alpha[0] * lexical[0][0, 1] * blank[1][2] * beta[2] +
+                alpha[1] * lexical[0][1, 1] * blank[1][2] * beta[2] +
+                alpha[2] * lexical[0][2, 1] * blank[1][2] * beta[2],
+            ],
+            [
+                0,
+                alpha[0] * lexical[0][0, 0] * lexical[1][1, 0] * blank[2][1] *
+                beta[1] + alpha[0] * lexical[0][0, 1] * lexical[1][2, 0] *
+                blank[2][1] * beta[1] + alpha[1] * lexical[0][1, 0] *
+                lexical[1][1, 0] * blank[2][1] * beta[1] + alpha[1] *
+                lexical[0][1, 1] * lexical[1][2, 0] * blank[2][1] * beta[1] +
+                alpha[2] * lexical[0][2, 0] * lexical[1][1, 0] * blank[2][1] *
+                beta[1] + alpha[2] * lexical[0][2, 1] * lexical[1][2, 0] *
+                blank[2][1] * beta[1],
+                alpha[0] * lexical[0][0, 0] * lexical[1][1, 1] * blank[2][2] *
+                beta[2] + alpha[0] * lexical[0][0, 1] * lexical[1][2, 1] *
+                blank[2][2] * beta[2] + alpha[1] * lexical[0][1, 0] *
+                lexical[1][1, 1] * blank[2][2] * beta[2] + alpha[1] *
+                lexical[0][1, 1] * lexical[1][2, 1] * blank[2][2] * beta[2] +
+                alpha[2] * lexical[0][2, 0] * lexical[1][1, 1] * blank[2][2] *
+                beta[2] + alpha[2] * lexical[0][2, 1] * lexical[1][2, 1] *
+                blank[2][2] * beta[2],
+            ],
+        ]) / z,
+        rtol=1e-4)
+    npt.assert_allclose(
+        lexical_marginals,
+        torch.Tensor([
+            [
+                [
+                    alpha[0] * lexical[0][0, 0] * blank[1][1] * beta[1] +
+                    alpha[0] * lexical[0][0, 0] * lexical[1][1, 0] *
+                    blank[2][1] * beta[1] + alpha[0] * lexical[0][0, 0] *
+                    lexical[1][1, 1] * blank[2][2] * beta[2],
+                    alpha[0] * lexical[0][0, 1] * blank[1][2] * beta[2] +
+                    alpha[0] * lexical[0][0, 1] * lexical[1][2, 0] *
+                    blank[2][1] * beta[1] + alpha[0] * lexical[0][0, 1] *
+                    lexical[1][2, 1] * blank[2][2] * beta[2],
+                ],
+                [
+                    alpha[1] * lexical[0][1, 0] * blank[1][1] * beta[1] +
+                    alpha[1] * lexical[0][1, 0] * lexical[1][1, 0] *
+                    blank[2][1] * beta[1] + alpha[1] * lexical[0][1, 0] *
+                    lexical[1][1, 1] * blank[2][2] * beta[2],
+                    alpha[1] * lexical[0][1, 1] * blank[1][2] * beta[2] +
+                    alpha[1] * lexical[0][1, 1] * lexical[1][2, 0] *
+                    blank[2][1] * beta[1] + alpha[1] * lexical[0][1, 1] *
+                    lexical[1][2, 1] * blank[2][2] * beta[2],
+                ],
+                [
+                    alpha[2] * lexical[0][2, 0] * blank[1][1] * beta[1] +
+                    alpha[2] * lexical[0][2, 0] * lexical[1][1, 0] *
+                    blank[2][1] * beta[1] + alpha[2] * lexical[0][2, 0] *
+                    lexical[1][1, 1] * blank[2][2] * beta[2],
+                    alpha[2] * lexical[0][2, 1] * blank[1][2] * beta[2] +
+                    alpha[2] * lexical[0][2, 1] * lexical[1][2, 0] *
+                    blank[2][1] * beta[1] + alpha[2] * lexical[0][2, 1] *
+                    lexical[1][2, 1] * blank[2][2] * beta[2],
+                ],
+            ],
+            [
+                [0, 0],
+                [
+                    alpha[0] * lexical[0][0, 0] * lexical[1][1, 0] *
+                    blank[2][1] * beta[1] + alpha[1] * lexical[0][1, 0] *
+                    lexical[1][1, 0] * blank[2][1] * beta[1] + alpha[2] *
+                    lexical[0][2, 0] * lexical[1][1, 0] * blank[2][1] * beta[1],
+                    alpha[0] * lexical[0][0, 0] * lexical[1][1, 1] *
+                    blank[2][2] * beta[2] + alpha[1] * lexical[0][1, 0] *
+                    lexical[1][1, 1] * blank[2][2] * beta[2] + alpha[2] *
+                    lexical[0][2, 0] * lexical[1][1, 1] * blank[2][2] * beta[2],
+                ],
+                [
+                    alpha[0] * lexical[0][0, 1] * lexical[1][2, 0] *
+                    blank[2][1] * beta[1] + alpha[1] * lexical[0][1, 1] *
+                    lexical[1][2, 0] * blank[2][1] * beta[1] + alpha[2] *
+                    lexical[0][2, 1] * lexical[1][2, 0] * blank[2][1] * beta[1],
+                    alpha[0] * lexical[0][0, 1] * lexical[1][2, 1] *
+                    blank[2][2] * beta[2] + alpha[1] * lexical[0][1, 1] *
+                    lexical[1][2, 1] * blank[2][2] * beta[2] + alpha[2] *
+                    lexical[0][2, 1] * lexical[1][2, 1] * blank[2][2] * beta[2],
+                ],
+            ],
+            [
+                [0, 0],
+                [0, 0],
+                [0, 0],
+            ],
+        ]) / z,
+        rtol=1e-4)
+
+  def test_string_forward(self):
+    alignment = alignments.FrameLabelDependent(max_expansions=2)
+    alpha = torch.rand([4])
+    blank = list(torch.rand([3, 4]))
+    lexical = list(torch.rand([3, 4]))
+
+    # Single.
+    next_alpha = alignment.string_forward(
+        alpha=alpha, blank=blank, lexical=lexical, semiring=semirings.Real)
+    npt.assert_allclose(next_alpha, [
+        alpha[0] * blank[0][0],
+        alpha[1] * blank[0][1] + alpha[0] * lexical[0][0] * blank[1][1],
+        alpha[2] * blank[0][2] + alpha[1] * lexical[0][1] * blank[1][2] +
+        alpha[0] * lexical[0][0] * lexical[1][1] * blank[2][2],
+        alpha[3] * blank[0][3] + alpha[2] * lexical[0][2] * blank[1][3] +
+        alpha[1] * lexical[0][1] * lexical[1][2] * blank[2][3],
+    ])
+
+    # Batched.
+    batched_next_alpha = alignment.string_forward(
+        alpha=alpha.unsqueeze(0),
+        blank=[i.unsqueeze(0) for i in blank],
+        lexical=[i.unsqueeze(0) for i in lexical],
+        semiring=semirings.Real)
+    npt.assert_allclose(batched_next_alpha, next_alpha.unsqueeze(0))
+
+    # Wrong number of weights.
+    with self.assertRaisesRegex(ValueError, 'blank should be'):
+      alignment.string_forward(
+          alpha=alpha,
+          blank=blank + blank,
+          lexical=lexical,
+          semiring=semirings.Real)
+    with self.assertRaisesRegex(ValueError, 'lexical should be'):
+      alignment.string_forward(
+          alpha=alpha,
+          blank=blank,
+          lexical=lexical + lexical,
+          semiring=semirings.Real)
+
 if __name__ == '__main__':
   absltest.main()

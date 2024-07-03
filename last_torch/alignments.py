@@ -399,7 +399,7 @@ class FrameLabelDependent(TimeSyncAlignmentLattice):
     blank_log_scale = beta - log_z.unsqueeze(-1)
     for i in range(self.max_expansions + 1):
       blank_marginals.append(
-        torch.exp(lexical_alphas[i], + blank[i] + blank_log_scale)
+        torch.exp(lexical_alphas[i] + blank[i] + blank_log_scale)
       )
     
     next_beta = blank[self.max_expansions] + beta
@@ -429,4 +429,4 @@ class FrameLabelDependent(TimeSyncAlignmentLattice):
     for i in range(self.max_expansions):
       last = shift_down(semiring.times(last, lexical[i]), semiring)
       terminated.append(semiring.times(last, blank[i + 1]))
-    return semiring.sum(torch.stack(terminated), axis=0)
+    return semiring.sum(torch.stack(terminated), dim=0)
