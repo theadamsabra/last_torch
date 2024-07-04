@@ -14,12 +14,8 @@
 
 """LAST API."""
 
-'''
-Will uncomment as we go file by file. 
-For now, leave it all "empty."
-'''
 
-#from last_torch import alignments
+from last_torch import alignments
 from last_torch import contexts
 from last_torch import semirings
 from last_torch import weight_fns
