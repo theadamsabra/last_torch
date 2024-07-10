@@ -239,3 +239,60 @@ class RecognitionLattice(nn.Module, Generic[T]):
     alignment_labels = alignment_labels.reshape([*batch_dims, -1])
     num_alignment_labels = num_alignment_states * num_frames
     return alignment_labels, num_alignment_labels, path_weights
+  
+  # Private methods:
+  def _string_forward(self, cache: T, frames: torch.Tensor,
+                    num_frames: torch.Tensor, labels: torch.Tensor,
+                    num_labels: torch.Tensor,
+                    semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    """Shortest distance on the intersection of the recognition lattice and an output string (the label sequence) computed using the forward algorithm.
+
+    Args:
+      cache: Weight function cache data.
+      frames: [batch_dims..., max_num_frames, feature_size] padded frame
+        sequences.
+      num_frames: [batch_dims...] number of frames.
+      labels: [batch_dims..., max_num_labels] padded label sequence.
+      num_labels: [batch_dims...] number of labels.
+      semiring: Semiring to use for shortest distance computation.
+
+    Returns:
+      [batch_dims...] shortest distance.
+    """
+    batch_dims = num_frames.shape
+    if frames.shape[:-2] != batch_dims:
+      raise ValueError('frames and num_frames have different batch_dims: '
+                        f'{frames.shape[:-2]} vs {batch_dims}')
+    if labels.shape[:-1] != batch_dims:
+      raise ValueError('labels and num_frames have different batch_dims: '
+                        f'{labels.shape[:-1]} vs {batch_dims}')
+    if num_labels.shape != batch_dims:
+      raise ValueError('num_labels and num_frames have different batch_dims: '
+                        f'{num_labels.shape} vs {batch_dims}')
+
+    # Calculate arc weights for all visited context states.
+    #
+    # We can't fit into memory all
+    # O(batch_size * max_num_frames * (max_num_labels + 1) * (vocab_size + 1))
+    # arcs, thus we use a scan loop over the (max_num_labels + 1) axis to
+    # produce just the O(batch_size * max_num_frames * (max_num_labels + 1))
+    # arcs actually needed later. This is better than scanning over the
+    # max_num_frames axis because weight_fn can be vectorized over multiple
+    # frames for the same state (weight_fn with states often involves
+    # gathering).
+
+    # Before vmaps
+    # - frame is [batch_dims..., hidden_size]
+    # - state is [batch_dims...]
+    # Results are ([batch_dims...], [batch_dims..., vocab_size]).
+    compute_weights = (
+        lambda weight_fn, frame, state: weight_fn(cache, frame, state))
+    # Add time dimension on frame
+    # - frame is [batch_dims..., max_num_frames, hidden_size]
+    # - state is [batch_dims...]
+    # Results are ([batch_dims..., max_num_frames],
+    # [batch_dims..., max_num_frames, vocab_size]).
+    compute_weights = torch.vmap(
+        compute_weights,
+        in_dims=(-2, None),
+        out_dims=(-1,-2))
