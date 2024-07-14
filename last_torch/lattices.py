@@ -19,7 +19,9 @@ import functools
 from typing import Any, Generic, Optional, Protocol, TypeVar
 
 import torch
+from torch import utils
 import torch.nn as nn
+import torch.utils._pytree as pytree 
 
 from last_torch import alignments
 from last_torch import contexts
@@ -103,13 +105,14 @@ class RecognitionLattice(nn.Module, Generic[T]):
                                                   weight_fns.WeightFnCacher[T]],
                 weight_fn_factory: Callable[[contexts.ContextDependency],
                                             weight_fns.WeightFn[T]]):
+    super().__init__()
     self.context = context
     self.alignment = alignment
     self.weight_fn_cacher_factory = weight_fn_cacher_factory
     self.weight_fn_factory = weight_fn_factory
 
     self.weight_fn_cacher = self.weight_fn_cacher_factory(self.context)
-    self.weight_fn = self.weight_fn(self.context)
+    self.weight_fn = self.weight_fn_factory(self.context)
 
   def build_cache(self) -> T:
     """Builds the weight function cache.
@@ -169,6 +172,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
       cache = cache,
       frames = frames,
       num_frames = num_frames,
+      labels = labels,
+      num_labels = num_labels,
       semiring = semiring)
     if isinstance(self.weight_fn, weight_fns.LocallyNormalizedWeightFn):
       return -numerator
@@ -296,3 +301,68 @@ class RecognitionLattice(nn.Module, Generic[T]):
         compute_weights,
         in_dims=(-2, None),
         out_dims=(-1,-2))
+
+    def gather_weight(weights, y):
+      # weights: [batch_dims..., max_num_frames, vocab_size]
+      # y: [batch_dims..., max_num_frames]
+      # weights are for labels [1, vocab_size], so y-1 are the corresponding
+      # indicies. one_hot(-1) is safe (all zeros).
+      mask = torch.nn.functional.one_hot(y - 1, weights.shape[-1])
+      return torch.einsum('...TV,...V->...T', weights, mask)
+
+    def weight_step(weight_fn, carry, inputs):
+      del carry
+      state, next_label = inputs
+      blank_weight, lexical_weights = compute_weights(weight_fn, frames, state)
+      lexical_weight = gather_weight(lexical_weights, next_label)
+      return None, (blank_weight, lexical_weight)
+
+    # prevent_cse is not needed in loops. Turning it off allows the compiler to
+    # better optimize the loop step.
+    weight_step = utils.checkpoint.checkpoint(weight_step, prevent_cse=False)
+
+    # [batch_dims..., max_num_labels + 1]
+    context_states = self.context.walk_states(labels)
+    context_next_labels = torch.concatenate(
+        [labels, torch.ones_like(labels[..., :1])], dim=-1)
+    # [batch_dims..., max_num_frames, max_num_labels+1]
+    _, (blank_weight, lexical_weight) = nn.scan(
+        weight_step,
+        variable_broadcast='params',
+        split_rngs={'params': False},
+        in_axes=len(batch_dims),
+        out_axes=len(batch_dims) + 1)(self.weight_fn, None,
+                                      (context_states, context_next_labels))
+
+    # Dynamic program for summing up all alignment paths. Actual work is done by
+    # alignment.string_forward(). This function mostly takes care of padding
+    # frames.
+    def shortest_distance_step(carry, inputs):
+      # alpha: [batch_dims..., max_num_labels + 1]
+      t, alpha = carry
+      # blank, lexical: [batch_dims..., max_num_labels + 1]
+      blank, lexical = inputs
+      # We current only support alignment-state invariant weights.
+      blank = [blank for _ in range(self.alignment.num_states())]
+      lexical = [lexical for _ in range(self.alignment.num_states())]
+      next_alpha = self.alignment.string_forward(
+          alpha=alpha, blank=blank, lexical=lexical, semiring=semiring)
+      is_padding = (t >= num_frames).unsqueeze(-1)
+      next_alpha = torch.where(is_padding, alpha, next_alpha)
+      return (t + 1, next_alpha), None
+
+    num_alpha_states = labels.shape[-1] + 1
+    init_alpha = _init_context_state_weights(
+        batch_dims=batch_dims,
+        dtype=lexical_weight.dtype,
+        num_states=num_alpha_states,
+        start=0,
+        semiring=semiring)
+    (_, alpha), _ = nn.scan(
+        shortest_distance_step, (0, init_alpha),
+        pytree.tree_map(
+            functools.partial(_to_time_major, num_batch_dims=len(batch_dims)),
+            (blank_weight, lexical_weight)))
+    is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states)
+    return semiring.sum(
+        torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
