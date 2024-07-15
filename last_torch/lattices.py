@@ -366,3 +366,125 @@ class RecognitionLattice(nn.Module, Generic[T]):
     is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states)
     return semiring.sum(
         torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
+
+  def _forward(
+      self,
+      cache: T,
+      frames: torch.Tensor,
+      num_frames: torch.Tensor,
+      semiring: semirings.Semiring[torch.Tensor],
+      blank_mask: Optional[Sequence[torch.Tensor]] = None,
+      lexical_mask: Optional[Sequence[torch.Tensor]] = None,
+  ) -> tuple[torch.Tensor, torch.Tensor]:
+    """Shortest distance on the recognition lattice computed using the forward algorithm.
+
+    It is often useful to differentiate through shortest distance with respect
+    to arc weights. For example, under the log semiring, that gives us arc
+    marginals; whereas under the tropical semiring, that gives us shortest path.
+    To make that possible while the arc weights are being computed on the fly,
+    we can pass in zero-valued masks. The masks are added onto arc weights, and
+    because d f(x + y) / dy | y=0 = d f(x) / dx, we can get gradients with
+    respect to arc weights (i.e. x) by differentiating over the masks (i.e. y).
+
+    Args:
+      cache: Weight function cache data.
+      frames: [batch_dims..., max_num_frames, feature_size] padded frame
+        sequences.
+      num_frames: [batch_dims...] number of frames.
+      semiring: Semiring to use for shortest distance computation.
+      blank_mask: Optional length num_alignment_states sequence whose elements
+        are broadcastable to [batch_dims..., max_num_frames,
+        num_context_states].
+      lexical_mask: Optional length num_alignment_states sequence whose elements
+        are broadcastable to [batch_dims..., max_num_frames, num_context_states,
+        vocab_size].
+
+    Returns:
+      (shortest_distance, alpha_0_to_T_minus_1) tuple,
+      -   shortest_distance: [batch_dims...] shortest distance.
+      -   alpha_0_to_T_minus_1: [batch_dims..., max_num_frames,
+          num_context_states] forward weights after observing 0 to T-1 frames
+          (T is the number of frames in the sequence).
+    """
+    batch_dims = num_frames.shape
+    if frames.shape[:-2] != batch_dims:
+      raise ValueError('frames and num_frames have different batch_dims: '
+                       f'{frames.shape[:-2]} vs {batch_dims}')
+    if blank_mask is not None and len(
+        blank_mask) != self.alignment.num_states():
+      raise ValueError(
+          'The length of blank_mask should be equal to '
+          f'{self.alignment.num_states()} (the number of alignment states), '
+          f'but is {len(blank_mask)}')
+    if lexical_mask is not None and len(
+        lexical_mask) != self.alignment.num_states():
+      raise ValueError(
+          'The length of lexical_mask should be equal to '
+          f'{self.alignment.num_states()} (the number of alignment states), '
+          f'but is {len(lexical_mask)}')
+
+    # Dynamic program for summing up all alignment paths.
+    def step(weight_fn, carry, inputs):
+      # alpha: [batch_dims..., num_context_states]
+      t, alpha = carry
+      # frame: [batch_dims..., hidden_size]
+      # blank_mask: None or [batch_dims...]
+      # lexical_mask: None or broadcastable to
+      #   [batch_dims..., num_alignment_states, vocab_size]
+      frame, blank_mask, lexical_mask = inputs
+      # blank: [batch_dims..., num_context_states]
+      # lexical: [batch_dims..., num_context_states, vocab_size]
+      blank, lexical = weight_fn(cache, frame)
+      # We currently only support alignment-state-invariant weights.
+      blank = [blank for _ in range(self.alignment.num_states())]
+      lexical = [lexical for _ in range(self.alignment.num_states())]
+      if blank_mask is not None:
+        blank = [b + m for b, m in zip(blank, blank_mask)]
+      if lexical_mask is not None:
+        lexical = [l + m for l, m in zip(lexical, lexical_mask)]
+      next_alpha = self.alignment.forward(
+          alpha=alpha,
+          blank=blank,
+          lexical=lexical,
+          context=self.context,
+          semiring=semiring)
+      is_padding = (t >= num_frames).unsqueeze(-1)
+      next_alpha = torch.where(is_padding, alpha, next_alpha)
+      return (t + 1, next_alpha), alpha
+
+    # Reduce memory footprint when using autodiff.
+    #
+    # For the log semiring, this is not as fast or memory efficient as forward-
+    # backward, but still better than the defaults (i.e. no remat or no saving
+    # intermediates at all).
+    #
+    # For the tropical semiring, this should be equivalent to no remat.
+    def save_small(prim, *args, **params):
+      y, _ = prim.abstract_eval(*args, **params)
+      greater_than_1_dims = len([None for i in y.shape if i > 1])
+      save = greater_than_1_dims <= (len(batch_dims) + 1)
+      return save
+
+    # prevent_cse is not needed in loops. Turning it off allows the compiler to
+    # better optimize the loop step.
+    step = nn.remat(step, prevent_cse=False, policy=save_small)
+
+    init_t = torch.Tensor([0])
+    init_alpha = _init_context_state_weights(
+        batch_dims=batch_dims,
+        # TODO(wuke): Find a way to do this with jax.eval_shape.
+        dtype=self.weight_fn(cache, frames[..., 0, :])[0].dtype,
+        num_states=self.context.shape()[0],
+        start=self.context.start(),
+        semiring=semiring)
+    init_carry = (init_t, init_alpha)
+
+    inputs = (frames, blank_mask, lexical_mask)
+    (_, alpha_T), alpha_0_to_T_minus_1 = nn.scan(  # pylint: disable=invalid-name
+        step,
+        variable_broadcast='params',
+        split_rngs={'params': False},
+        in_axes=len(batch_dims),
+        out_axes=len(batch_dims))(self.weight_fn, init_carry, inputs)
+
+    return semiring.sum(alpha_T, axis=-1), alpha_0_to_T_minus_1
