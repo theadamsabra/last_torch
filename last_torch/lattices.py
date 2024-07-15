@@ -488,3 +488,31 @@ class RecognitionLattice(nn.Module, Generic[T]):
         out_axes=len(batch_dims))(self.weight_fn, init_carry, inputs)
 
     return semiring.sum(alpha_T, axis=-1), alpha_0_to_T_minus_1
+
+def _init_context_state_weights(
+    batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
+    semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+  is_start = torch.arange(num_states) == start
+  weights = torch.where(is_start, semiring.ones([], dtype),
+                      semiring.zeros([], dtype))
+  return torch.broadcast_to(weights, (*batch_dims, num_states))
+
+
+def _to_time_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
+  # [batch_dims..., time, ...] -> [time, batch_dims..., ...]
+  axes = [
+      num_batch_dims,
+      *range(num_batch_dims),
+      *range(num_batch_dims + 1, x.ndim),
+  ]
+  return torch.transpose(x, axes)
+
+
+def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
+  # [time, batch_dims..., ...] -> [batch_dims..., time, ...]
+  axes = [
+      *range(1, num_batch_dims + 1),
+      0,
+      *range(num_batch_dims + 1, x.ndim),
+  ]
+  return torch.transpose(x, axes)
