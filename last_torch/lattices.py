@@ -154,7 +154,6 @@ class RecognitionLattice(nn.Module, Generic[T]):
       [batch_dims...] negative sequence log-prob loss.
     """
     batch_dims = num_frames.shape
-    batch_dims = num_frames.shape
     if frames.shape[:-2] != batch_dims:
       raise ValueError('frames and num_frames have different batch_dims: '
                        f'{frames.shape[:-2]} vs {batch_dims}')
@@ -290,50 +289,52 @@ class RecognitionLattice(nn.Module, Generic[T]):
     # - frame is [batch_dims..., hidden_size]
     # - state is [batch_dims...]
     # Results are ([batch_dims...], [batch_dims..., vocab_size]).
-    compute_weights = (
-        lambda weight_fn, frame, state: weight_fn(cache, frame, state))
+
     # Add time dimension on frame
     # - frame is [batch_dims..., max_num_frames, hidden_size]
     # - state is [batch_dims...]
     # Results are ([batch_dims..., max_num_frames],
     # [batch_dims..., max_num_frames, vocab_size]).
-    compute_weights = torch.vmap(
-        compute_weights,
-        in_dims=(-2, None),
-        out_dims=(-1,-2))
 
     def gather_weight(weights, y):
       # weights: [batch_dims..., max_num_frames, vocab_size]
       # y: [batch_dims..., max_num_frames]
       # weights are for labels [1, vocab_size], so y-1 are the corresponding
       # indicies. one_hot(-1) is safe (all zeros).
-      mask = torch.nn.functional.one_hot(y - 1, weights.shape[-1])
-      return torch.einsum('...TV,...V->...T', weights, mask)
+      mask = torch.nn.functional.one_hot((y - 1).long(), weights.shape[-1])
+      return torch.einsum('...TV,...V->...T', weights, mask.float())
 
-    def weight_step(weight_fn, carry, inputs):
+    def weight_step(weight_fn, cache, carry, inputs):
       del carry
       state, next_label = inputs
-      blank_weight, lexical_weights = compute_weights(weight_fn, frames, state)
+      num_frames = frames.shape[-2]
+
+      blank_weight = torch.tensor(()) 
+      lexical_weights = torch.tensor(()) 
+
+      # Get weights for all frames:
+      for i in range(num_frames):
+        sub_blank_weight, sub_lexical_weights = weight_fn(cache, frames[:, i, :], state)
+        blank_weight = torch.cat((blank_weight, sub_blank_weight))
+        lexical_weights = torch.cat((lexical_weights, sub_lexical_weights))
+
+      # Reshape:
+      blank_weight = blank_weight.reshape((int(len(blank_weight)/num_frames), num_frames))
+      lexical_weights = lexical_weights.reshape((int(len(lexical_weights)/num_frames),
+                                                 num_frames,
+                                                 weight_fn.vocab_size))
+
       lexical_weight = gather_weight(lexical_weights, next_label)
       return None, (blank_weight, lexical_weight)
-
-    # prevent_cse is not needed in loops. Turning it off allows the compiler to
-    # better optimize the loop step.
-    weight_step = utils.checkpoint.checkpoint(weight_step, prevent_cse=False)
 
     # [batch_dims..., max_num_labels + 1]
     context_states = self.context.walk_states(labels)
     context_next_labels = torch.concatenate(
         [labels, torch.ones_like(labels[..., :1])], dim=-1)
     # [batch_dims..., max_num_frames, max_num_labels+1]
-    _, (blank_weight, lexical_weight) = nn.scan(
-        weight_step,
-        variable_broadcast='params',
-        split_rngs={'params': False},
-        in_axes=len(batch_dims),
-        out_axes=len(batch_dims) + 1)(self.weight_fn, None,
-                                      (context_states, context_next_labels))
-
+    _, (blank_weight, lexical_weight) = weight_step_scan(weight_step, self.weight_fn,
+                                                         cache, None,
+                                                         (context_states, context_next_labels))
     # Dynamic program for summing up all alignment paths. Actual work is done by
     # alignment.string_forward(). This function mostly takes care of padding
     # frames.
@@ -358,7 +359,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
         num_states=num_alpha_states,
         start=0,
         semiring=semiring)
-    (_, alpha), _ = nn.scan(
+    (_, alpha), _ = scan(
         shortest_distance_step, (0, init_alpha),
         pytree.tree_map(
             functools.partial(_to_time_major, num_batch_dims=len(batch_dims)),
@@ -465,9 +466,6 @@ class RecognitionLattice(nn.Module, Generic[T]):
       save = greater_than_1_dims <= (len(batch_dims) + 1)
       return save
 
-    # prevent_cse is not needed in loops. Turning it off allows the compiler to
-    # better optimize the loop step.
-    step = nn.remat(step, prevent_cse=False, policy=save_small)
 
     init_t = torch.Tensor([0])
     init_alpha = _init_context_state_weights(
@@ -480,7 +478,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
     init_carry = (init_t, init_alpha)
 
     inputs = (frames, blank_mask, lexical_mask)
-    (_, alpha_T), alpha_0_to_T_minus_1 = nn.scan(  # pylint: disable=invalid-name
+    #TODO: custom scan
+    (_, alpha_T), alpha_0_to_T_minus_1 = scan_step(  # pylint: disable=invalid-name
         step,
         variable_broadcast='params',
         split_rngs={'params': False},
@@ -516,3 +515,26 @@ def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
       *range(num_batch_dims + 1, x.ndim),
   ]
   return torch.transpose(x, axes)
+
+
+def weight_step_scan(weight_step, weight_fn, cache, carry, inputs):
+    # Define weight step scan:
+    state, next_label = inputs
+    assert state.shape == next_label.shape
+
+    num_states = state.shape[-1]
+    blank_weight = torch.tensor(()) 
+    lexical_weights = torch.tensor(()) 
+
+    for i in range(num_states):
+      # TODO: accommodate when tensor is 3D (i.e. has batch size)
+      new_state, new_next_label = state[:,i], next_label[:,i]
+      _, (sub_blank_weight, sub_lexical_weight) = weight_step(weight_fn, cache, carry,
+                                                              (new_state, new_next_label))
+      blank_weight = torch.cat((blank_weight, sub_blank_weight))
+      lexical_weights = torch.cat((lexical_weights, sub_lexical_weight))
+    
+    final_shape = tuple(sub_blank_weight.shape) + (num_states,)
+    blank_weight = blank_weight.reshape(final_shape)
+    lexical_weights = lexical_weights.reshape(final_shape)
+    return None, (blank_weight, lexical_weights)
