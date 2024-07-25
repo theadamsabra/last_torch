@@ -258,7 +258,7 @@ class _LogAddExp(torch.autograd.Function):
   def setup_context(ctx, inputs, output):
     a, b = inputs
     _, (ea, eb, z) = output
-    ctx.save_for_backward((ea, eb, z))
+    ctx.save_for_backward(ea, eb, z)
 
   @staticmethod
   def backward(ctx, grad):
@@ -283,7 +283,7 @@ class _LogSumExp(torch.autograd.Function):
     e = torch.exp(a - c)
     z = torch.sum(e, dim=dim, keepdim=True)
     r = torch.squeeze(c, dim=dim) + torch.log(torch.squeeze(z, dim=dim))
-    ctx.save_for_backward((e, z, dim))
+    ctx.save_for_backward(e, z, dim)
     return r
   
   @staticmethod

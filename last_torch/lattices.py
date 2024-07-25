@@ -359,11 +359,13 @@ class RecognitionLattice(nn.Module, Generic[T]):
         num_states=num_alpha_states,
         start=0,
         semiring=semiring)
-    (_, alpha), _ = scan(
-        shortest_distance_step, (0, init_alpha),
+    (_, alpha), _ = shortest_distance_step_scan(
+        shortest_distance_step,
+        (0, init_alpha),
         pytree.tree_map(
             functools.partial(_to_time_major, num_batch_dims=len(batch_dims)),
-            (blank_weight, lexical_weight)))
+            (blank_weight, lexical_weight))
+        )
     is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states)
     return semiring.sum(
         torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
@@ -504,7 +506,7 @@ def _to_time_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
       *range(num_batch_dims),
       *range(num_batch_dims + 1, x.ndim),
   ]
-  return torch.transpose(x, axes)
+  return torch.permute(x, tuple(axes))
 
 
 def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
@@ -538,3 +540,11 @@ def weight_step_scan(weight_step, weight_fn, cache, carry, inputs):
     blank_weight = blank_weight.reshape(final_shape)
     lexical_weights = lexical_weights.reshape(final_shape)
     return None, (blank_weight, lexical_weights)
+
+def shortest_distance_step_scan(shortest_distance_step, init, xs):
+  blank_weight, lexical_weight = xs
+
+  for i in range(blank_weight.shape[0]):
+    (_, alpha), _ = shortest_distance_step(init, (blank_weight[i,:], lexical_weight[i,:]))
+
+  return (None, alpha), None
