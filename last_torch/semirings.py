@@ -283,16 +283,17 @@ class _LogSumExp(torch.autograd.Function):
     e = torch.exp(a - c)
     z = torch.sum(e, dim=dim, keepdim=True)
     r = torch.squeeze(c, dim=dim) + torch.log(torch.squeeze(z, dim=dim))
-    ctx.save_for_backward(e, z, dim)
+    ctx.e = e
+    ctx.z = z
+    ctx.dim = dim
     return r
   
   @staticmethod
   def backward(ctx, g):
-    e, z, dim, = ctx.saved_tensors
-    safe = z != 0
+    safe = ctx.z != 0
     z = torch.where(safe, z, 1)
-    g = torch.unsqueeze(g, dim=dim)
-    return (g / z * e,)
+    g = torch.unsqueeze(g, dim=ctx.dim)
+    return (g / z * ctx.e,)
 
 
 _logsumexp = _LogSumExp.apply

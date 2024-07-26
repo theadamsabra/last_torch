@@ -490,6 +490,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     return semiring.sum(alpha_T, axis=-1), alpha_0_to_T_minus_1
 
+
+
+
+
 def _init_context_state_weights(
     batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
     semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
@@ -542,9 +546,13 @@ def weight_step_scan(weight_step, weight_fn, cache, carry, inputs):
     return None, (blank_weight, lexical_weights)
 
 def shortest_distance_step_scan(shortest_distance_step, init, xs):
+  t, alpha = init
   blank_weight, lexical_weight = xs
 
   for i in range(blank_weight.shape[0]):
-    (_, alpha), _ = shortest_distance_step(init, (blank_weight[i,:], lexical_weight[i,:]))
+    (t, alpha), _ = shortest_distance_step((t, alpha), (blank_weight[i,:], lexical_weight[i,:]))
 
-  return (None, alpha), None
+  return (t, alpha), None
+
+def scan_step(scan_fn, weight_fn, init_carry, inputs):
+  pass
