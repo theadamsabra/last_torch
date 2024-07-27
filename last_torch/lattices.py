@@ -481,18 +481,150 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     inputs = (frames, blank_mask, lexical_mask)
     #TODO: custom scan
-    (_, alpha_T), alpha_0_to_T_minus_1 = scan_step(  # pylint: disable=invalid-name
+    (_, alpha_T), alpha_0_to_T_minus_1 = scan_step( 
         step,
-        variable_broadcast='params',
-        split_rngs={'params': False},
-        in_axes=len(batch_dims),
-        out_axes=len(batch_dims))(self.weight_fn, init_carry, inputs)
-
+        self.weight_fn, 
+        init_carry, inputs)
     return semiring.sum(alpha_T, axis=-1), alpha_0_to_T_minus_1
 
+  def _forward_backward(self, cache: T, frames: torch.Tensor,
+                        num_frames: torch.Tensor, init_callback_carry: ...) -> torch.Tensor:
+    """Shortest distance under the log semiring with gradients computed using the backward algorithm.
+
+    Args:
+      cache: Weight function cache data.
+      frames: [batch_dims..., max_num_frames, feature_size] padded frame
+        sequences.
+      num_frames: [batch_dims...] number of frames.
+      init_callback_carry: PyTree of initial carry value for the callback.
+
+    Returns:
+      [batch_dims...] shortest distance.
+    """
+    semiring = semirings.Log
+
+    class ForwardBackward(torch.autograd.Function):
+      @staticmethod
+      def forward(ctx, lattice, cache, frames):
+        log_z, alpha_0_to_T_minus_1 = lattice._forward(
+          cache=cache,
+          frames=frames,
+          num_frames=num_frames,
+          semiring=semiring
+        )
+        return log_z, alpha_0_to_T_minus_1
+
+      @staticmethod
+      def backward(ctx, grad_output):
+        """Computes arc marginals under the log semiring using the backward algorithm.
+
+        Under the log semiring, arc weights can be viewed as unnormalized log
+        probabilities, and a conditional distribution over paths can be defined by
+        normalizing with respect to the exponentiated shortest distance (i.e. sum of
+        unnormalized path probabilities). The marginal probability of each arc can
+        then be computed with the backward algorithm.
+
+        Mathematically, under the log semiring, arc marginals are equal to the
+        gradients of shortest distance with respect to arc weights. The backward
+        algorithm offers a slightly more efficient method for computing these
+        gradients than reverse mode automatic differentiation with gradient
+        rematerialization:
+        -   Both methods compute the arc weights twice: once in the forward pass,
+            once in the backward pass.
+        -   Both methods carry out the "backward-broadcast" operation, i.e.
+            broadcasting the backward weights from a destination state to all source
+            states, once in the backward pass.
+        -   Autodiff carries out the "forward-reduce" operation, i.e. summing up
+            path weights to the same destination state, twice: once in the forward
+            pass, once in the backward pass.
+        -   Forward-backward only carries out the "forward-reduce" operation once,
+            in the forward pass.
+
+        In other words, forward-backward saves one "forward-reduce" operation. The
+        savings can be significant when the "forward-reduce" call is often
+        expensive, which is the main justification for all this added complexity.
+
+        Args:
+          cache: Weight function cache data.
+          frames: [batch_dims..., max_num_frames, feature_size] padded frame
+            sequences.
+          num_frames: [batch_dims...] number of frames.
+          log_z: [batch_dims...] shortest distance from _forward(). Under the log
+            semiring, the shortest distance is the log-normalizer, thus the name.
+          alpha_0_to_T_minus_1: [batch_dims..., max_num_frames, num_context_states]
+            forward weights from _forward().
+          callback: Callback used in the backward algorithm loop.
+
+        Returns:
+          (final_callback_carry, callback_outputs) tuple.
+        """
+        log_z, alpha_0_to_T_minus_1 = grad_output
+
+        batch_dims = num_frames.shape
+        if frames.shape[:-2] != batch_dims:
+          raise ValueError('frames and num_frames have different batch_dims: '
+                          f'{frames.shape[:-2]} vs {batch_dims}')
+        if log_z.shape != batch_dims:
+          raise ValueError('log_z and num_frames have different batch_dims: '
+                          f'{log_z.shape} vs {batch_dims}')
+        if alpha_0_to_T_minus_1.shape[:-2] != batch_dims:
+          raise ValueError(
+              'alpha_0_to_T_minus_1 and num_frames have different '
+              f'batch_dims: {alpha_0_to_T_minus_1.shape[:-2]} vs {batch_dims}')
+
+        def step(lattice, carry, inputs):
+          # beta: [batch_dims..., num_context_states]
+          t, beta, callback_carry = carry
+          # alpha: [batch_dims..., num_context_states]
+          # frame: [batch_dims..., hidden_size]
+          alpha, frame = inputs
+          # blank: [batch_dims..., num_context_states]
+          # lexical: [batch_dims..., num_context_states, vocab_size]
+          (blank, lexical), weight_vjp_fn = nn.vjp(
+              lambda lattice, cache, frame: lattice.weight_fn(cache, frame),
+              lattice, cache, frame)
+          # We currently only support alignment-state-invariant weights.
+          blank = [blank for _ in range(self.alignment.num_states())]
+          lexical = [lexical for _ in range(self.alignment.num_states())]
+          next_beta, blank_marginal, lexical_marginals = self.alignment.backward(
+              alpha=alpha,
+              blank=blank,
+              lexical=lexical,
+              beta=beta,
+              log_z=log_z,
+              context=self.context)
+          # We currently only support alignment-state-invariant weights.
+          blank_marginal = jnp.sum(jnp.stack(blank_marginal), axis=0)
+          lexical_marginals = jnp.sum(jnp.stack(lexical_marginals), axis=0)
+          # Mask out marginals on padding positions.
+          is_padding = (t >= num_frames)[..., jnp.newaxis]
+          next_beta = jnp.where(is_padding, beta, next_beta)
+          blank_marginal = jnp.where(is_padding, 0, blank_marginal)
+          lexical_marginals = jnp.where(is_padding[..., jnp.newaxis], 0,
+                                        lexical_marginals)
+          next_callback_carry, callback_outputs = callback(
+              weight_vjp_fn=weight_vjp_fn,
+              carry=callback_carry,
+              blank_marginal=blank_marginal,
+              lexical_marginals=lexical_marginals)
+
+          return (t - 1, next_beta, next_callback_carry), callback_outputs
 
 
+        num_context_states, _ = self.context.shape()
+        init_beta = semirings.Log.ones([*batch_dims, num_context_states],
+                                      log_z.dtype)
+        init_t = torch.Tensor(frames.shape[-2] - 1)
+        init_carry = (init_t, init_beta, init_callback_carry)
 
+        inputs = (alpha_0_to_T_minus_1, frames)
+        (_, _, final_callback_carry), callback_outputs = scan_step_backward(
+            step,
+            init_carry, 
+            inputs
+        )
+
+        return final_callback_carry, callback_outputs
 
 def _init_context_state_weights(
     batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
@@ -554,5 +686,8 @@ def shortest_distance_step_scan(shortest_distance_step, init, xs):
 
   return (t, alpha), None
 
-def scan_step(scan_fn, weight_fn, init_carry, inputs):
+def scan_step_forward(scan_fn, weight_fn, init_carry, inputs):
+  pass
+
+def scan_step_backward(scan_fn, weight_fn, init_carry, inputs):
   pass
