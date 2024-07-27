@@ -480,15 +480,16 @@ class RecognitionLattice(nn.Module, Generic[T]):
     init_carry = (init_t, init_alpha)
 
     inputs = (frames, blank_mask, lexical_mask)
-    #TODO: custom scan
-    (_, alpha_T), alpha_0_to_T_minus_1 = scan_step( 
+    in_dim = len(batch_dims)
+
+    (_, alpha_T), alpha_0_to_T_minus_1 = scan_step_forward( 
         step,
         self.weight_fn, 
-        init_carry, inputs)
+        init_carry, inputs, in_dim)
     return semiring.sum(alpha_T, axis=-1), alpha_0_to_T_minus_1
 
   def _forward_backward(self, cache: T, frames: torch.Tensor,
-                        num_frames: torch.Tensor, init_callback_carry: ...) -> torch.Tensor:
+                        num_frames: torch.Tensor) -> torch.Tensor:
     """Shortest distance under the log semiring with gradients computed using the backward algorithm.
 
     Args:
@@ -505,8 +506,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     class ForwardBackward(torch.autograd.Function):
       @staticmethod
-      def forward(ctx, lattice, cache, frames):
-        log_z, alpha_0_to_T_minus_1 = lattice._forward(
+      def forward(ctx, cache, frames):
+        log_z, alpha_0_to_T_minus_1 = self._forward(
           cache=cache,
           frames=frames,
           num_frames=num_frames,
@@ -594,13 +595,13 @@ class RecognitionLattice(nn.Module, Generic[T]):
               log_z=log_z,
               context=self.context)
           # We currently only support alignment-state-invariant weights.
-          blank_marginal = jnp.sum(jnp.stack(blank_marginal), axis=0)
-          lexical_marginals = jnp.sum(jnp.stack(lexical_marginals), axis=0)
+          blank_marginal = torch.sum(torch.stack(blank_marginal), axis=0)
+          lexical_marginals = torch.sum(torch.stack(lexical_marginals), axis=0)
           # Mask out marginals on padding positions.
-          is_padding = (t >= num_frames)[..., jnp.newaxis]
-          next_beta = jnp.where(is_padding, beta, next_beta)
-          blank_marginal = jnp.where(is_padding, 0, blank_marginal)
-          lexical_marginals = jnp.where(is_padding[..., jnp.newaxis], 0,
+          is_padding = (t >= num_frames)[..., torch.newaxis]
+          next_beta = torch.where(is_padding, beta, next_beta)
+          blank_marginal = torch.where(is_padding, 0, blank_marginal)
+          lexical_marginals = torch.where(is_padding[..., torch.newaxis], 0,
                                         lexical_marginals)
           next_callback_carry, callback_outputs = callback(
               weight_vjp_fn=weight_vjp_fn,
@@ -625,6 +626,11 @@ class RecognitionLattice(nn.Module, Generic[T]):
         )
 
         return final_callback_carry, callback_outputs
+
+    _fwd_bwd = ForwardBackward.apply    
+    return _fwd_bwd(cache, frames)
+
+
 
 def _init_context_state_weights(
     batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
@@ -686,8 +692,17 @@ def shortest_distance_step_scan(shortest_distance_step, init, xs):
 
   return (t, alpha), None
 
-def scan_step_forward(scan_fn, weight_fn, init_carry, inputs):
-  pass
+def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim):
+  t, alpha = init_carry
+  frames, blank_mask, lexical_mask = inputs
+  
+  for i in range(frames.shape[in_dim]):
+    frame = torch.index_select(frames, in_dim, torch.tensor(i))
+    (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
+                                     (t, alpha),
+                                     (frame, blank_mask, lexical_mask))
+  
+  return (t, alpha), alpha_t_minus_1
 
 def scan_step_backward(scan_fn, weight_fn, init_carry, inputs):
   pass
