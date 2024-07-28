@@ -694,15 +694,24 @@ def shortest_distance_step_scan(shortest_distance_step, init, xs):
 
 def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim):
   t, alpha = init_carry
+
+  alpha_0_to_t_minus_1 = torch.tensor(())
+
   frames, blank_mask, lexical_mask = inputs
   
   for i in range(frames.shape[in_dim]):
-    frame = torch.index_select(frames, in_dim, torch.tensor(i))
+    frame = torch.index_select(frames, in_dim, torch.tensor(i)).squeeze(in_dim)
     (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
                                      (t, alpha),
                                      (frame, blank_mask, lexical_mask))
-  
-  return (t, alpha), alpha_t_minus_1
+
+    alpha_0_to_t_minus_1 = torch.cat((alpha_t_minus_1, alpha_0_to_t_minus_1))  
+
+  alpha_0_to_t_minus_1 = alpha_0_to_t_minus_1.reshape(
+    frames.shape[:-1] + (alpha_0_to_t_minus_1.shape[-1],)  
+  )
+
+  return (t, alpha), alpha_0_to_t_minus_1 
 
 def scan_step_backward(scan_fn, weight_fn, init_carry, inputs):
   pass
