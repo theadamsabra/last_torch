@@ -176,7 +176,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
       semiring = semiring)
     if isinstance(self.weight_fn, weight_fns.LocallyNormalizedWeightFn):
       return -numerator
-    denominator = self._forward_backward(
+    denominator, _ = self._forward_backward(
       cache=cache, frames=frames, num_frames=num_frames
     )
     return denominator - numerator
@@ -481,12 +481,13 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     inputs = (frames, blank_mask, lexical_mask)
     in_dim = len(batch_dims)
+    out_dim = len(batch_dims)
 
     (_, alpha_T), alpha_0_to_T_minus_1 = scan_step_forward( 
         step,
         self.weight_fn, 
-        init_carry, inputs, in_dim)
-    return semiring.sum(alpha_T, axis=-1), alpha_0_to_T_minus_1
+        init_carry, inputs, in_dim, out_dim)
+    return semiring.sum(alpha_T, dim=-1), alpha_0_to_T_minus_1
 
   def _forward_backward(self, cache: T, frames: torch.Tensor,
                         num_frames: torch.Tensor) -> torch.Tensor:
@@ -692,7 +693,7 @@ def shortest_distance_step_scan(shortest_distance_step, init, xs):
 
   return (t, alpha), None
 
-def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim):
+def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim):
   t, alpha = init_carry
 
   alpha_0_to_t_minus_1 = torch.tensor(())
@@ -705,10 +706,10 @@ def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim):
                                      (t, alpha),
                                      (frame, blank_mask, lexical_mask))
 
-    alpha_0_to_t_minus_1 = torch.cat((alpha_t_minus_1, alpha_0_to_t_minus_1))  
+    alpha_0_to_t_minus_1 = torch.cat((alpha_t_minus_1, alpha_0_to_t_minus_1), dim=out_dim)  
 
   alpha_0_to_t_minus_1 = alpha_0_to_t_minus_1.reshape(
-    frames.shape[:-1] + (alpha_0_to_t_minus_1.shape[-1],)  
+    frames.shape[:-1] + (alpha.shape[-1],)  
   )
 
   return (t, alpha), alpha_0_to_t_minus_1 
