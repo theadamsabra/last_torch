@@ -217,8 +217,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     # Find shortest path by differentiating shortest distance under the tropical
     # semiring. Called forward_helper to not be confused with forward pass in torch
-    def forward_helper(lattice: 'RecognitionLattice', lexical_mask: torch.Tensor):
-      path_weights, _ = lattice._forward(
+    def forward_helper(lexical_mask: torch.Tensor):
+      path_weights, _ = self._forward(
         cache=cache,
         frames=frames,
         num_frames=num_frames,
@@ -233,10 +233,13 @@ class RecognitionLattice(nn.Module, Generic[T]):
     lexical_mask = torch.zeros(
       [*batch_dims, max_num_frames, num_alignment_states, vocab_size]
     )
-    path_weights, vjp_fn = torch.autograd.functional.vjp(
+
+    path_weights = forward_helper(lexical_mask)
+
+    path_weights, vjp_fn = torch.func.vjp(
       forward_helper, lexical_mask
     )
-    _, viterbi_lexical_mask = vjp_fn(torch.ones_like(path_weights))
+    viterbi_lexical_mask = vjp_fn(torch.ones_like(path_weights))[0]
     is_blank = torch.all(viterbi_lexical_mask == 0, dim=-1)
     alignment_labels = torch.where(is_blank, 0,
                                    1 + torch.argmax(viterbi_lexical_mask, dim=-1))
@@ -486,7 +489,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
     (_, alpha_T), alpha_0_to_T_minus_1 = scan_step_forward( 
         step,
         self.weight_fn, 
-        init_carry, inputs, in_dim, out_dim)
+        init_carry, inputs, in_dim, out_dim, self.alignment.num_states())
     return semiring.sum(alpha_T, dim=-1), alpha_0_to_T_minus_1
 
   def _forward_backward(self, cache: T, frames: torch.Tensor,
@@ -693,18 +696,27 @@ def shortest_distance_step_scan(shortest_distance_step, init, xs):
 
   return (t, alpha), None
 
-def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim):
+def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, num_alignment_states=None):
   t, alpha = init_carry
 
   alpha_0_to_t_minus_1 = torch.tensor(())
 
   frames, blank_mask, lexical_mask = inputs
-  
+
+     
   for i in range(frames.shape[in_dim]):
     frame = torch.index_select(frames, in_dim, torch.tensor(i)).squeeze(in_dim)
-    (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
-                                     (t, alpha),
-                                     (frame, blank_mask, lexical_mask))
+
+    if lexical_mask != None:
+      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
+      (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
+                                      (t, alpha),
+                                      (frame, blank_mask, lexical_mask_framed))
+    
+    else:
+      (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
+                                      (t, alpha),
+                                      (frame, blank_mask, lexical_mask))
 
     alpha_0_to_t_minus_1 = torch.cat((alpha_t_minus_1, alpha_0_to_t_minus_1), dim=out_dim)  
 

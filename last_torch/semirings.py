@@ -369,18 +369,24 @@ _maximum = Maximum.apply
 class Max(torch.autograd.Function):
 
   @staticmethod
-  def forward(ctx, a, dim):
-    argmax = torch.argmax(a, dim=dim)
-    width = a.shape[dim]
-    ctx.save_for_backward(argmax, torch.Tensor([width]), torch.Tensor([dim]))
+  def forward(a, dim):
     return torch.max(a, dim=dim).values
 
   @staticmethod
+  def setup_context(ctx: Any, inputs: torch.Tuple[Any], output: Any) -> Any:
+    a, dim = inputs
+    argmax = torch.argmax(a, dim=dim)
+    width = a.shape[dim]
+    ctx.save_for_backward(argmax)
+    ctx.width = width
+    ctx.dim = dim
+
+  @staticmethod
   def backward(ctx, g):
-    argmax, width, dim, = ctx.saved_tensors
+    argmax, = ctx.saved_tensors
     # Can only pass tensors through, so we convert back to int:
-    width = int(width)
-    dim = int(dim)
+    width = int(ctx.width)
+    dim = int(ctx.dim)
     mask = torch.nn.functional.one_hot(argmax, width).to(g.dtype)
     # Move width back to original dim:
     mask = torch.movedim(mask, -1, dim)
