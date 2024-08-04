@@ -86,3 +86,41 @@ class RecognitionLatticeBasicsTest(absltest.TestCase):
             num_frames=num_frames,
             labels=labels,
             num_labels=num_labels[:1])
+
+  def test_shortest_path(self):
+    vocab_size = 2
+    context_size = 1
+    lattice = last_torch.RecognitionLattice(
+        context=last_torch.contexts.FullNGram(
+            vocab_size=vocab_size, context_size=context_size),
+        alignment=last_torch.alignments.FrameDependent(),
+        weight_fn_cacher_factory=weight_fn_cacher_factory,
+        weight_fn_factory=weight_fn_factory)
+    frames = torch.rand([4, 6, 8])
+    num_frames = torch.Tensor([6, 3, 2, 0])
+    alignment_labels, num_alignment_labels, path_weights = lattice.shortest_path(frames, num_frames)
+
+    with self.subTest('reasonable outputs'):
+      npt.assert_array_equal(num_alignment_labels, [6, 3, 2, 0])
+      is_padding = torch.arange(6) >= num_frames.unsqueeze(-1)
+      npt.assert_array_equal(
+          torch.where(is_padding, alignment_labels, -1), [
+              [-1, -1, -1, -1, -1, -1],
+              [-1, -1, -1, 0, 0, 0],
+              [-1, -1, 0, 0, 0, 0],
+              [0, 0, 0, 0, 0, 0],
+          ])
+      npt.assert_array_equal(
+          alignment_labels >= 0,
+          torch.ones([4, 6], dtype=bool),
+          err_msg=f'alignment_labels={alignment_labels!r}')
+      npt.assert_array_equal(
+          alignment_labels <= vocab_size,
+          torch.ones([4, 6], dtype=bool),
+          err_msg=f'alignment_labels={alignment_labels!r}')
+      npt.assert_array_equal(
+          torch.isfinite(path_weights), [True, True, True, True],
+          err_msg=f'path_weights={path_weights!r}')
+      npt.assert_array_equal(
+          path_weights == 0, [False, False, False, True],
+          err_msg=f'path_weights={path_weights!r}')
