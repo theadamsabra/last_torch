@@ -258,7 +258,7 @@ class _LogAddExp(torch.autograd.Function):
   def setup_context(ctx, inputs, output):
     a, b = inputs
     _, (ea, eb, z) = output
-    ctx.save_for_backward((ea, eb, z))
+    ctx.save_for_backward(ea, eb, z)
 
   @staticmethod
   def backward(ctx, grad):
@@ -283,16 +283,17 @@ class _LogSumExp(torch.autograd.Function):
     e = torch.exp(a - c)
     z = torch.sum(e, dim=dim, keepdim=True)
     r = torch.squeeze(c, dim=dim) + torch.log(torch.squeeze(z, dim=dim))
-    ctx.save_for_backward((e, z, dim))
+    ctx.e = e
+    ctx.z = z
+    ctx.dim = dim
     return r
   
   @staticmethod
   def backward(ctx, g):
-    e, z, dim, = ctx.saved_tensors
-    safe = z != 0
+    safe = ctx.z != 0
     z = torch.where(safe, z, 1)
-    g = torch.unsqueeze(g, dim=dim)
-    return (g / z * e,)
+    g = torch.unsqueeze(g, dim=ctx.dim)
+    return (g / z * ctx.e,)
 
 
 _logsumexp = _LogSumExp.apply
@@ -368,18 +369,24 @@ _maximum = Maximum.apply
 class Max(torch.autograd.Function):
 
   @staticmethod
-  def forward(ctx, a, dim):
-    argmax = torch.argmax(a, dim=dim)
-    width = a.shape[dim]
-    ctx.save_for_backward(argmax, torch.Tensor([width]), torch.Tensor([dim]))
+  def forward(a, dim):
     return torch.max(a, dim=dim).values
 
   @staticmethod
+  def setup_context(ctx: Any, inputs: torch.Tuple[Any], output: Any) -> Any:
+    a, dim = inputs
+    argmax = torch.argmax(a, dim=dim)
+    width = a.shape[dim]
+    ctx.save_for_backward(argmax)
+    ctx.width = width
+    ctx.dim = dim
+
+  @staticmethod
   def backward(ctx, g):
-    argmax, width, dim, = ctx.saved_tensors
+    argmax, = ctx.saved_tensors
     # Can only pass tensors through, so we convert back to int:
-    width = int(width)
-    dim = int(dim)
+    width = int(ctx.width)
+    dim = int(ctx.dim)
     mask = torch.nn.functional.one_hot(argmax, width).to(g.dtype)
     # Move width back to original dim:
     mask = torch.movedim(mask, -1, dim)

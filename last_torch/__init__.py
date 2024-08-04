@@ -19,7 +19,7 @@ from last_torch import alignments
 from last_torch import contexts
 from last_torch import semirings
 from last_torch import weight_fns
-#from last_torch.lattices import RecognitionLattice
+from last_torch.lattices import RecognitionLattice
 
 # A new PyPI release will be pushed everytime `__version__` is increased.
 #__version__ = '0.0.1'
