@@ -124,3 +124,52 @@ class RecognitionLatticeBasicsTest(absltest.TestCase):
       npt.assert_array_equal(
           path_weights == 0, [False, False, False, True],
           err_msg=f'path_weights={path_weights!r}')
+
+  def test_frame_label_dependent(self):
+    vocab_size = 2
+    context_size = 1
+    lattice = last_torch.RecognitionLattice(
+        context=last_torch.contexts.FullNGram(
+            vocab_size=vocab_size, context_size=context_size),
+        alignment=last_torch.alignments.FrameLabelDependent(max_expansions=2),
+        weight_fn_cacher_factory=weight_fn_cacher_factory,
+        weight_fn_factory=weight_fn_factory)
+    frames = torch.rand([4, 6, 8])
+    num_frames = torch.Tensor([6, 3, 2, 1])
+    labels = torch.Tensor([[1, 1, 1, 1], [2, 2, 2, 2], [1, 2, 1, 2], [2, 1, 2, 1]])
+    num_labels = torch.Tensor([4, 3, 4, 3])
+
+    with self.subTest('loss'):
+      loss = lattice(
+          frames=frames,
+          num_frames=num_frames,
+          labels=labels,
+          num_labels=num_labels)
+      npt.assert_array_equal(torch.isfinite(loss), [True, True, True, False])
+
+    with self.subTest('shortest_path'):
+      alignment_labels, num_alignment_labels, path_weights = lattice.shortest_path(frames, num_frames)
+      npt.assert_array_equal(num_alignment_labels, 3 * num_frames)
+      is_padding = torch.arange(18) >= num_alignment_labels[:, None]
+
+      npt.assert_array_equal(
+          is_padding.int(), [
+            [0] * 18,
+            [0] * 9 + [1] * 9,
+            [0] * 6 + [1] * 12,
+            [0] * 3 + [1] * 15,
+          ])
+      # Every third label is 0.
+      npt.assert_array_equal(
+          alignment_labels.reshape([4, 6, 3])[..., -1], torch.zeros([4, 6]))
+      npt.assert_array_equal(
+          alignment_labels >= 0,
+          torch.ones([4, 18], dtype=bool),
+          err_msg=f'alignment_labels={alignment_labels!r}')
+      npt.assert_array_equal(
+          alignment_labels <= vocab_size,
+          torch.ones([4, 18], dtype=bool),
+          err_msg=f'alignment_labels={alignment_labels!r}')
+      npt.assert_array_equal(
+          torch.isfinite(path_weights), [True, True, True, True],
+          err_msg=f'path_weights={path_weights!r}')

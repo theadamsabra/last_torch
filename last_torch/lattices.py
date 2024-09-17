@@ -234,15 +234,13 @@ class RecognitionLattice(nn.Module, Generic[T]):
       [*batch_dims, max_num_frames, num_alignment_states, vocab_size]
     )
 
-    path_weights = forward_helper(lexical_mask)
-
     path_weights, vjp_fn = torch.func.vjp(
       forward_helper, lexical_mask
     )
     viterbi_lexical_mask = vjp_fn(torch.ones_like(path_weights))[0]
     is_blank = torch.all(viterbi_lexical_mask == 0, dim=-1)
     alignment_labels = torch.where(is_blank, 0,
-                                   1 + torch.argmax(viterbi_lexical_mask, dim=-1))
+                                   torch.argmax(viterbi_lexical_mask, dim=-1))
     alignment_labels = alignment_labels.reshape([*batch_dims, -1])
     num_alignment_labels = num_alignment_states * num_frames
     return alignment_labels, num_alignment_labels, path_weights
@@ -718,7 +716,7 @@ def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, n
                                       (t, alpha),
                                       (frame, blank_mask, lexical_mask))
 
-    alpha_0_to_t_minus_1 = torch.cat((alpha_t_minus_1, alpha_0_to_t_minus_1), dim=out_dim)  
+    alpha_0_to_t_minus_1 = torch.cat((alpha_0_to_t_minus_1, alpha_t_minus_1), dim=out_dim)  
 
   alpha_0_to_t_minus_1 = alpha_0_to_t_minus_1.reshape(
     frames.shape[:-1] + (alpha.shape[-1],)  
