@@ -508,7 +508,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     class ForwardBackward(torch.autograd.Function):
       @staticmethod
-      def forward(ctx, cache, frames):
+      def forward(cache, frames):
         log_z, alpha_0_to_T_minus_1 = self._forward(
           cache=cache,
           frames=frames,
@@ -516,6 +516,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
           semiring=semiring
         )
         return log_z, alpha_0_to_T_minus_1
+
+      @staticmethod
+      def setup_context(ctx, inputs, output):
+        pass
 
       @staticmethod
       def backward(ctx, grad_output):
