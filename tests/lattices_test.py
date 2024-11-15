@@ -216,8 +216,8 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
                 torch.Tensor([
                     -1 + 10, -1 + 11, -1 + 12, -2 + 13, -2 + 14, -2 + 15,
                     -3 + 16, -3 + 17, -3 + 18
-                ]).float(), 0),
-            torch.logsumexp(torch.Tensor([19, 20, 21]).float(), 0), 0.
+                ]), 0),
+            torch.logsumexp(torch.Tensor([19, 20, 21]).float(), 0).float(), 0.
         ])
     ]:
       semiring = getattr(last_torch.semirings, semiring_name)
@@ -229,36 +229,37 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
                 num_frames=num_frames,
                 semiring=semiring)[0], expected)
 
-#     with self.subTest('shortest_path'):
-#       alignment_labels, num_alignment_labels, path_weights = (
-#           lattice.shortest_path(
-#               frames=frames, num_frames=num_frames, cache=None))
-#       npt.assert_array_equal(num_alignment_labels, num_frames)
-#       npt.assert_allclose(path_weights, [-3 + 18, 21, 0])
-#       npt.assert_array_equal(alignment_labels, [
-#           [2, 2],
-#           [2, 0],
-#           [0, 0],
-#       ])
+    # with self.subTest('shortest_path'):
+    #   alignment_labels, num_alignment_labels, path_weights = (
+    #       lattice.shortest_path(
+    #           frames=frames, num_frames=num_frames, cache=None))
+    #   npt.assert_array_equal(num_alignment_labels, num_frames)
+    #   npt.assert_allclose(path_weights, [-3 + 18, 21, 0])
+    #   npt.assert_array_equal(alignment_labels, [
+    #       [2, 2],
+    #       [2, 0],
+    #       [0, 0],
+    #   ])
 
-#     # String forward, i.e. shortest distance after intersection with a string.
-#     labels = torch.Tensor([[1, 2, 0], [2, 1, 0], [1, 2, 0]]).float()
-#     num_labels = torch.Tensor([1, 1, 0]).float()
-#     for semiring_name, expected in [
-#         ('MaxTropical', [-2 + 13, 21, 0]),
-#         ('Real', [(-1) * 11 + (-2) * 13, 21, 1]),
-#         ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13])), 21., 0.])
-#     ]:
-#       semiring = getattr(last_torch.semirings, semiring_name)
-#       with self.subTest(f'string_forward/{semiring_name}'):
-#         npt.assert_allclose(
-#             lattice._string_forward(
-#                 cache=None,
-#                 frames=frames,
-#                 num_frames=num_frames,
-#                 labels=labels,
-#                 num_labels=num_labels,
-#                 semiring=semiring), expected)
+    # # String forward, i.e. shortest distance after intersection with a string.
+    # labels = torch.Tensor([[1, 2, 0], [2, 1, 0], [1, 2, 0]]).float()
+    # num_labels = torch.Tensor([1, 1, 0]).float()
+    # for semiring_name, expected in [
+    #     ('MaxTropical', [-2 + 13, 21, 0]),
+    #     ('Real', [(-1) * 11 + (-2) * 13, 21, 1]),
+    #     ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13])), 21, 0])
+    # ]:
+    #   print(semiring_name)
+    #   semiring = getattr(last_torch.semirings, semiring_name)
+    #   with self.subTest(f'string_forward/{semiring_name}'):
+    #     npt.assert_allclose(
+    #         lattice._string_forward(
+    #             cache=None,
+    #             frames=frames,
+    #             num_frames=num_frames,
+    #             labels=labels,
+    #             num_labels=num_labels,
+    #             semiring=semiring), expected)
 #       with self.subTest(f'string_forward non-reachable/{semiring_name}'):
 #         npt.assert_array_equal(
 #             lattice._string_forward(
