@@ -141,13 +141,13 @@ class RecognitionLatticeBasicsTest(absltest.TestCase):
     labels = torch.Tensor([[1, 1, 1, 1], [2, 2, 2, 2], [1, 2, 1, 2], [2, 1, 2, 1]])
     num_labels = torch.Tensor([4, 3, 4, 3])
 
-    # with self.subTest('loss'):
-    #   loss = lattice(
-    #       frames=frames,
-    #       num_frames=num_frames,
-    #       labels=labels,
-    #       num_labels=num_labels)
-    #   npt.assert_array_equal(torch.isfinite(loss), [True, True, True, False])
+    with self.subTest('loss'):
+      loss = lattice(
+          frames=frames,
+          num_frames=num_frames,
+          labels=labels,
+          num_labels=num_labels)
+      npt.assert_array_equal(torch.isfinite(loss), [True, True, True, False])
 
     with self.subTest('shortest_path'):
       alignment_labels, num_alignment_labels, path_weights = lattice.shortest_path(frames, num_frames)
