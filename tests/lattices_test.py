@@ -57,13 +57,14 @@ class RecognitionLatticeBasicsTest(absltest.TestCase):
         num_labels=num_labels)
     npt.assert_array_equal(torch.isfinite(loss), [True, True, True, False])
 
-    # with self.subTest('padded inputs'):
-    #   loss_with_padded_inputs = lattice.apply(
-    #       frames=jnp.pad(frames, [(0, 0), (0, 1), (0, 0)]),
-    #       num_frames=num_frames,
-    #       labels=jnp.pad(labels, [(0, 0), (0, 2)]),
-    #       num_labels=num_labels)
-    #   npt.assert_allclose(loss_with_padded_inputs, loss)
+    with self.subTest('padded inputs'):
+        loss_with_padded_inputs = lattice(
+            frames=torch.nn.functional.pad(frames, (0,0,0,1,0,0)),
+            num_frames=num_frames,
+            labels=torch.nn.functional.pad(labels, (0, 2, 0, 0)),
+            num_labels=num_labels)
+        # Set higher rtol due to lack of PRNGKey in torch (i.e. can't get meaningful reproducibility)
+        npt.assert_allclose(loss_with_padded_inputs.detach().numpy(), loss.detach().numpy(), rtol=2)
 
     with self.subTest('invalid shapes'):
       with self.assertRaisesRegex(

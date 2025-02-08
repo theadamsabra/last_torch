@@ -311,13 +311,16 @@ class RecognitionLattice(nn.Module, Generic[T]):
         in_dims=1,
         out_dims=-1
     )
+    def make_safe_classes(y):
+       return torch.where(y-1 < 0, 0, 0)
 
     def gather_weight(weights, y):
       # weights: [batch_dims..., max_num_frames, vocab_size]
       # y: [batch_dims..., max_num_frames]
       # weights are for labels [1, vocab_size], so y-1 are the corresponding
       # indicies. one_hot(-1) is safe (all zeros).
-      mask = torch.nn.functional.one_hot((y - 1).long(), weights.shape[-1])
+      y = make_safe_classes(y)
+      mask = torch.nn.functional.one_hot(y.long(), weights.shape[-1])
       return torch.einsum('...TV,...V->...T', weights, mask.float())
 
     def weight_step(carry, inputs):
