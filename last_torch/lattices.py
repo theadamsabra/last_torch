@@ -20,6 +20,7 @@ from typing import Any, Generic, Optional, Protocol, TypeVar
 
 import torch
 from torch import utils
+from torch._higher_order_ops import scan
 import torch.nn as nn
 import torch.utils._pytree as pytree 
 
@@ -296,6 +297,20 @@ class RecognitionLattice(nn.Module, Generic[T]):
     # - state is [batch_dims...]
     # Results are ([batch_dims..., max_num_frames],
     # [batch_dims..., max_num_frames, vocab_size]).
+    compute_weights = (
+      lambda frame: self.weight_fn(cache, frame, self._state))
+    # Add time dimension on frame
+    # - frame is [batch_dims..., max_num_frames, hidden_size]
+    # - state is [batch_dims...]
+    # Results are ([batch_dims..., max_num_frames],
+    # [batch_dims..., max_num_frames, vocab_size]).
+
+    compute_weights = torch.vmap(
+        compute_weights,
+        randomness='same',
+        in_dims=1,
+        out_dims=-1
+    )
 
     def gather_weight(weights, y):
       # weights: [batch_dims..., max_num_frames, vocab_size]
@@ -305,37 +320,24 @@ class RecognitionLattice(nn.Module, Generic[T]):
       mask = torch.nn.functional.one_hot((y - 1).long(), weights.shape[-1])
       return torch.einsum('...TV,...V->...T', weights, mask.float())
 
-    def weight_step(weight_fn, cache, carry, inputs):
-      del carry
-      state, next_label = inputs
-      num_frames = frames.shape[-2]
-
-      blank_weight = torch.tensor(()) 
-      lexical_weights = torch.tensor(()) 
-
-      # Get weights for all frames:
-      for i in range(num_frames):
-        sub_blank_weight, sub_lexical_weights = weight_fn(cache, frames[:, i, :], state)
-        blank_weight = torch.cat((blank_weight, sub_blank_weight))
-        lexical_weights = torch.cat((lexical_weights, sub_lexical_weights))
-
-      # Reshape:
-      blank_weight = blank_weight.reshape((int(len(blank_weight)/num_frames), num_frames))
-      lexical_weights = lexical_weights.reshape((int(len(lexical_weights)/num_frames),
-                                                 num_frames,
-                                                 weight_fn.vocab_size))
-
-      lexical_weight = gather_weight(lexical_weights, next_label)
-      return None, (blank_weight, lexical_weight)
+    def weight_step(carry, inputs):
+      self._state, next_label = inputs
+      blank_weight, lexical_weights = compute_weights(frames)
+      lexical_weight = gather_weight(lexical_weights.permute(0,2,1), 
+                                     next_label)
+      #      carry = None doesn't hold for pytorch's scan. We replace with
+      #      torch.zeros(1)
+      return carry, (blank_weight, lexical_weight)
 
     # [batch_dims..., max_num_labels + 1]
     context_states = self.context.walk_states(labels)
     context_next_labels = torch.concatenate(
         [labels, torch.ones_like(labels[..., :1])], dim=-1)
     # [batch_dims..., max_num_frames, max_num_labels+1]
-    _, (blank_weight, lexical_weight) = weight_step_scan(weight_step, self.weight_fn,
-                                                         cache, None,
-                                                         (context_states, context_next_labels))
+    blank_weight, lexical_weight = weight_step_scan(
+      weight_step, batch_dims, context_states, context_next_labels
+    )
+
     # Dynamic program for summing up all alignment paths. Actual work is done by
     # alignment.string_forward(). This function mostly takes care of padding
     # frames.
@@ -667,27 +669,22 @@ def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
   return torch.transpose(x, axes)
 
 
-def weight_step_scan(weight_step, weight_fn, cache, carry, inputs):
-    # Define weight step scan:
-    state, next_label = inputs
-    assert state.shape == next_label.shape
+def weight_step_scan(weight_step, batch_dims, context_states, context_next_labels):
+  assert context_states.shape == context_next_labels.shape
+  carry = torch.zeros(len(batch_dims))
+  blank_weight = torch.Tensor()
+  lexical_weight = torch.Tensor()
 
-    num_states = state.shape[-1]
-    blank_weight = torch.tensor(()) 
-    lexical_weights = torch.tensor(()) 
+  for last_dim_i in range(context_next_labels.shape[-1]):
+    inputs = (
+      context_states[:, last_dim_i],
+      context_next_labels[:, last_dim_i]
+    )
+    _, (blank_weight_i, lexical_weight_i) = weight_step(carry, inputs)
+    blank_weight = torch.concat([blank_weight, blank_weight_i.unsqueeze(-1)], dim=-1)
+    lexical_weight = torch.concat([lexical_weight, lexical_weight_i.unsqueeze(-1)],dim=-1)
 
-    for i in range(num_states):
-      # TODO: accommodate when tensor is 3D (i.e. has batch size)
-      new_state, new_next_label = state[:,i], next_label[:,i]
-      _, (sub_blank_weight, sub_lexical_weight) = weight_step(weight_fn, cache, carry,
-                                                              (new_state, new_next_label))
-      blank_weight = torch.cat((blank_weight, sub_blank_weight))
-      lexical_weights = torch.cat((lexical_weights, sub_lexical_weight))
-    
-    final_shape = tuple(sub_blank_weight.shape) + (num_states,)
-    blank_weight = blank_weight.reshape(final_shape)
-    lexical_weights = lexical_weights.reshape(final_shape)
-    return None, (blank_weight, lexical_weights)
+  return blank_weight, lexical_weight
 
 def shortest_distance_step_scan(shortest_distance_step, init, xs):
   t, alpha = init
