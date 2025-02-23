@@ -230,17 +230,17 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
                 num_frames=num_frames,
                 semiring=semiring)[0], expected)
 
-    # with self.subTest('shortest_path'):
-    #   alignment_labels, num_alignment_labels, path_weights = (
-    #       lattice.shortest_path(
-    #           frames=frames, num_frames=num_frames, cache=None))
-    #   npt.assert_array_equal(num_alignment_labels, num_frames)
-    #   npt.assert_allclose(path_weights, [-3 + 18, 21, 0])
-    #   npt.assert_array_equal(alignment_labels, [
-    #       [2, 2],
-    #       [2, 0],
-    #       [0, 0],
-    #   ])
+    with self.subTest('shortest_path'):
+      alignment_labels, num_alignment_labels, path_weights = (
+          lattice.shortest_path(
+              frames=frames, num_frames=num_frames, cache=None))
+      npt.assert_array_equal(num_alignment_labels, num_frames)
+      npt.assert_allclose(path_weights, [-3 + 18, 21, 0])
+      npt.assert_array_equal(alignment_labels, [
+          [1, 1],
+          [0, 0],
+          [0, 0],
+      ])
 
     # # String forward, i.e. shortest distance after intersection with a string.
     # labels = torch.Tensor([[1, 2, 0], [2, 1, 0], [1, 2, 0]]).float()
