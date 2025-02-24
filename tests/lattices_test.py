@@ -20,7 +20,6 @@ from absl.testing import absltest
 import torch 
 import last_torch
 import numpy.testing as npt
-import torch.utils._pytree as pytree 
 
 
 def weight_fn_cacher_factory(context: last_torch.contexts.FullNGram):
@@ -242,34 +241,34 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
           [0, 0],
       ])
 
-    # # String forward, i.e. shortest distance after intersection with a string.
-    # labels = torch.Tensor([[1, 2, 0], [2, 1, 0], [1, 2, 0]]).float()
-    # num_labels = torch.Tensor([1, 1, 0]).float()
-    # for semiring_name, expected in [
-    #     ('MaxTropical', [-2 + 13, 21, 0]),
-    #     ('Real', [(-1) * 11 + (-2) * 13, 21, 1]),
-    #     ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13])), 21, 0])
-    # ]:
-    #   print(semiring_name)
-    #   semiring = getattr(last_torch.semirings, semiring_name)
-    #   with self.subTest(f'string_forward/{semiring_name}'):
-    #     npt.assert_allclose(
-    #         lattice._string_forward(
-    #             cache=None,
-    #             frames=frames,
-    #             num_frames=num_frames,
-    #             labels=labels,
-    #             num_labels=num_labels,
-    #             semiring=semiring), expected)
-#       with self.subTest(f'string_forward non-reachable/{semiring_name}'):
-#         npt.assert_array_equal(
-#             lattice._string_forward(
-#                 cache=None,
-#                 frames=frames,
-#                 num_frames=num_frames,
-#                 labels=labels,
-#                 num_labels=torch.Tensor([3, 2, 1]),
-#                 semiring=semiring), semiring.zeros([3]))
+    # String forward, i.e. shortest distance after intersection with a string.
+    labels = torch.Tensor([[1, 2, 0], [2, 1, 0], [1, 2, 0]]).float()
+    num_labels = torch.Tensor([1, 1, 0]).float()
+    for semiring_name, expected in [
+        ('MaxTropical', [-2 + 13, 20, 0]),
+        ('Real', [(-1) * 11 + (-2) * 13, 20, 1]),
+        ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13]), dim=0), 20, 0])
+    ]:
+      print(semiring_name)
+      semiring = getattr(last_torch.semirings, semiring_name)
+      with self.subTest(f'string_forward/{semiring_name}'):
+        npt.assert_allclose(
+            lattice._string_forward(
+                cache=None,
+                frames=frames,
+                num_frames=num_frames,
+                labels=labels,
+                num_labels=num_labels,
+                semiring=semiring), expected)
+      with self.subTest(f'string_forward non-reachable/{semiring_name}'):
+        npt.assert_array_equal(
+            lattice._string_forward(
+                cache=None,
+                frames=frames,
+                num_frames=num_frames,
+                labels=labels,
+                num_labels=torch.Tensor([3, 2, 1]),
+                semiring=semiring), semiring.zeros([3]))
 
 #     with self.subTest('call'):
 #       log_loss = lattice(
