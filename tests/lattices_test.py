@@ -245,9 +245,9 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
     labels = torch.Tensor([[1, 2, 0], [2, 1, 0], [1, 2, 0]]).float()
     num_labels = torch.Tensor([1, 1, 0]).float()
     for semiring_name, expected in [
-        ('MaxTropical', [-2 + 13, 20, 0]),
-        ('Real', [(-1) * 11 + (-2) * 13, 20, 1]),
-        ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13]), dim=0), 20, 0])
+        ('MaxTropical', [-2 + 13, 21, 0]),
+        ('Real', [(-1) * 11 + (-2) * 13, 21, 1]),
+        ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13]), dim=0), 21, 0])
     ]:
       semiring = getattr(last_torch.semirings, semiring_name)
       with self.subTest(f'string_forward/{semiring_name}'):
@@ -283,7 +283,7 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
                       -1 + 10, -1 + 11, -1 + 12, -2 + 13, -2 + 14, -2 + 15,
                       -3 + 16, -3 + 17, -3 + 18
                   ]), dim=0) - torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13]), dim=0),
-              torch.logsumexp(torch.Tensor([19, 20, 21]), dim=0) - 20., 0.
+              torch.logsumexp(torch.Tensor([19, 20, 21]), dim=0) - 21., 0.
           ],
           rtol=1e-6)
 
