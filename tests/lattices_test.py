@@ -249,7 +249,6 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
         ('Real', [(-1) * 11 + (-2) * 13, 20, 1]),
         ('Log', [torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13]), dim=0), 20, 0])
     ]:
-      print(semiring_name)
       semiring = getattr(last_torch.semirings, semiring_name)
       with self.subTest(f'string_forward/{semiring_name}'):
         npt.assert_allclose(
@@ -270,23 +269,23 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
                 num_labels=torch.Tensor([3, 2, 1]),
                 semiring=semiring), semiring.zeros([3]))
 
-#     with self.subTest('call'):
-#       log_loss = lattice(
-#           frames=frames,
-#           num_frames=num_frames,
-#           labels=labels,
-#           num_labels=num_labels,
-#           cache=None)
-#       npt.assert_allclose(
-#           log_loss, [
-#               torch.logsumexp(
-#                   torch.Tensor([
-#                       -1 + 10, -1 + 11, -1 + 12, -2 + 13, -2 + 14, -2 + 15,
-#                       -3 + 16, -3 + 17, -3 + 18
-#                   ])) - torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13])),
-#               torch.logsumexp(torch.Tensor([19, 20, 21])) - 21., 0.
-#           ],
-#           rtol=1e-6)
+    with self.subTest('call'):
+      log_loss = lattice(
+          frames=frames,
+          num_frames=num_frames,
+          labels=labels,
+          num_labels=num_labels,
+          cache=None)
+      npt.assert_allclose(
+          log_loss, [
+              torch.logsumexp(
+                  torch.Tensor([
+                      -1 + 10, -1 + 11, -1 + 12, -2 + 13, -2 + 14, -2 + 15,
+                      -3 + 16, -3 + 17, -3 + 18
+                  ]), dim=0) - torch.logsumexp(torch.Tensor([-1 + 11, -2 + 13]), dim=0),
+              torch.logsumexp(torch.Tensor([19, 20, 21]), dim=0) - 20., 0.
+          ],
+          rtol=1e-6)
 
 #   def test_arc_marginals(self):
 #     # Test _backward() by computing arc marginals. This is a bit easier to debug
