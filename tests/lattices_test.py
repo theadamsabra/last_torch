@@ -375,7 +375,8 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
         )
         return log_z
 
-    expected_log_z, expected_vjp_fn = torch.func.vjp(forward, frames)
+    expected_log_z, _ = torch.func.vjp(forward, frames)
+    expected_grads = torch.gradient(forward(frames))[0]
 
     def forward_backward(frames):
         cache = lattice.build_cache() 
@@ -384,20 +385,11 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
             frames=frames,
             num_frames=num_frames)
 
-    (actual_log_z, _), actual_vjp_fn = torch.func.vjp(forward_backward, frames)
+    (actual_log_z, _), _ = torch.func.vjp(forward_backward, frames)
+    actual_grads = torch.gradient(forward_backward(frames)[0])[0]
 
     npt.assert_allclose(actual_log_z.detach().numpy(), expected_log_z.detach().numpy(), rtol=0.5)
-
-    # TODO: Debug backward w/ setup_context
-    # for g in [
-    #     torch.ones_like(expected_log_z),
-    #     torch.rand(expected_log_z.shape)
-    # ]:
-    #     expected_grads = expected_vjp_fn(g)
-    #     actual_grads = actual_vjp_fn(g)
-    #     pytree.tree_map(
-    #         functools.partial(npt.assert_allclose, rtol=1e-3, atol=1e-6),
-    #         actual_grads, expected_grads)
+    npt.assert_allclose(actual_grads.detach().numpy(), expected_grads.detach().numpy(), rtol=0.5)
 
 if __name__ == '__main__':
   absltest.main()
