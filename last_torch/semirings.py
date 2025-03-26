@@ -15,7 +15,7 @@
 '''Semirings.'''
 from collections.abc import Sequence
 import dataclasses
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, Optional, TypeVar, Tuple
 
 import torch
 import torch.utils._pytree as pytree 
@@ -212,7 +212,7 @@ class _Log(Semiring[torch.Tensor]):
     _check_axis(a, dim)
     # Special handling for safe gradients:
     if torch.numel(a) > 0:
-      return _logsumexp(a, dim)
+      return _logsumexp(a, dim)[0]
     # Summing empty input should result in zeros:
     if dim < 0:
       dim += a.ndim
@@ -258,7 +258,7 @@ class _LogAddExp(torch.autograd.Function):
   def setup_context(ctx, inputs, output):
     a, b = inputs
     _, (ea, eb, z) = output
-    ctx.save_for_backward((ea, eb, z))
+    ctx.save_for_backward(ea, eb, z)
 
   @staticmethod
   def backward(ctx, grad):
@@ -276,23 +276,28 @@ class _LogSumExp(torch.autograd.Function):
   """Specialized log add exp with safe gradients."""
 
   @staticmethod
-  def forward(ctx, a, dim):
+  def forward(a, dim):
     c = torch.max(a, dim=dim, keepdim=True).values
     safe = torch.isfinite(c)
     c = torch.where(safe, c, 0)
     e = torch.exp(a - c)
     z = torch.sum(e, dim=dim, keepdim=True)
     r = torch.squeeze(c, dim=dim) + torch.log(torch.squeeze(z, dim=dim))
-    ctx.save_for_backward((e, z, dim))
-    return r
-  
+    return r, e, z
+
   @staticmethod
-  def backward(ctx, g):
-    e, z, dim, = ctx.saved_tensors
-    safe = z != 0
-    z = torch.where(safe, z, 1)
-    g = torch.unsqueeze(g, dim=dim)
-    return (g / z * e,)
+  def setup_context(ctx, inputs, output):
+    _, dim = inputs
+    _, e, z = output
+    ctx.save_for_backward(e, z)
+    ctx.dim = dim
+
+  @staticmethod
+  def backward(ctx, grad, e_, z_):
+    safe = z_ != 0
+    z = torch.where(safe, z_, 1)
+    g = torch.unsqueeze(grad, dim=ctx.dim)
+    return (g / z * e_), None, None
 
 
 _logsumexp = _LogSumExp.apply
@@ -368,18 +373,24 @@ _maximum = Maximum.apply
 class Max(torch.autograd.Function):
 
   @staticmethod
-  def forward(ctx, a, dim):
-    argmax = torch.argmax(a, dim=dim)
-    width = a.shape[dim]
-    ctx.save_for_backward(argmax, torch.Tensor([width]), torch.Tensor([dim]))
+  def forward(a, dim):
     return torch.max(a, dim=dim).values
 
   @staticmethod
+  def setup_context(ctx: Any, inputs: Tuple[Any], output: Any) -> Any:
+    a, dim = inputs
+    argmax = torch.argmax(a, dim=dim)
+    width = a.shape[dim]
+    ctx.save_for_backward(argmax)
+    ctx.width = width
+    ctx.dim = dim
+
+  @staticmethod
   def backward(ctx, g):
-    argmax, width, dim, = ctx.saved_tensors
+    argmax, = ctx.saved_tensors
     # Can only pass tensors through, so we convert back to int:
-    width = int(width)
-    dim = int(dim)
+    width = int(ctx.width)
+    dim = int(ctx.dim)
     mask = torch.nn.functional.one_hot(argmax, width).to(g.dtype)
     # Move width back to original dim:
     mask = torch.movedim(mask, -1, dim)

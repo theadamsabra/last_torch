@@ -330,12 +330,12 @@ class TableWeightFn(WeightFn[type(None)]):
                        f'got ({frame.shape[:-1]})')
 
     frame_mask = F.one_hot(frame[..., 0].to(torch.int64), input_vocab_size)
-    weights = torch.einsum('...xcy,...x->...cy', self.table, frame_mask)
+    weights = torch.einsum('...xcy,...x->...cy', self.table.float(), frame_mask.float())
 
     if state is not None:
       state = torch.broadcast_to(state, batch_dims).to(torch.int64)
       state_mask = F.one_hot(state, num_context_states)
-      weights = torch.einsum('...cy,...c->...y', weights, state_mask)
+      weights = torch.einsum('...cy,...c->...y', weights.float(), state_mask.float())
 
     blank = weights[..., 0]
     lexical = weights[..., 1:]

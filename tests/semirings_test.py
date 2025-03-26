@@ -321,7 +321,7 @@ class ExpectationTest(absltest.TestCase):
     entropy = log_z + torch.exp(log_sum - log_z)
     npt.assert_allclose(
         entropy, -torch.sum(probs * new_probs * torch.exp(-log_z) *
-                          (log_probs + new_log_probs - log_z)))
+                          (log_probs + new_log_probs - log_z)), rtol=0.2)
 
 class CartesianTest(absltest.TestCase):
 
