@@ -90,18 +90,15 @@ class Encoder(nn.Module):
         Returns:
             [batch_size, max_num_frames, hidden_size] output sequences.
         """
-        # A stack of num_layers LSTMs.
-        for _ in range(self.num_layers):
-            continue 
-        pass
+        input_size = xs.shape[-1]
 
-#       cell = nn.scan(
-#           nn.OptimizedLSTMCell,
-#           variable_broadcast='params',
-#           split_rngs={'params': False},
-#           in_axes=1,
-#           out_axes=1,
-#       )(self.hidden_size)
-#       init_carry = cell.initialize_carry(dummy_rng, xs[:, 0, :].shape)
-#       _, xs = cell(init_carry, xs)
-#     return xs
+        # Make it an attribute so we can access it for later analysis
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=self.hidden_size,
+            num_layers=self.num_layers # We can do stacked LSTM with this param
+        )
+        
+        # Return final encoded output
+        return self.lstm(xs)[0]
+        
