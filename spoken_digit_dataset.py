@@ -1,10 +1,14 @@
 import torch
 import numpy as np
 import torchfsdd  
+
+from torch import nn
 from torch.utils.data import Dataset
 from torchaudio.transforms import MFCC
 
-
+'''
+HELPER FUNCTIONS
+'''
 def make_text_labels(int_label: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Converts class labels into text.
 
@@ -65,3 +69,39 @@ def slice_and_process_dataset(
     ) 
     fsdd_dataset = torchfsdd.TorchFSDD(files=files, transforms=transform)
     return fsdd_dataset[1000:], fsdd_dataset[:1000]
+
+
+'''
+MODEL DEFINITIONS
+'''
+class Encoder(nn.Module):
+    """A stack of unidirectional LSTMs."""
+    def __init__(self, hidden_size:int, num_layers:int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+    def forward(self, xs:torch.Tensor):
+        """Encode the inputs.
+        
+        Args:
+            xs: [batch_size, max_num_frames, feature_size] input sequences
+
+        Returns:
+            [batch_size, max_num_frames, hidden_size] output sequences.
+        """
+        # A stack of num_layers LSTMs.
+        for _ in range(self.num_layers):
+            continue 
+        pass
+
+#       cell = nn.scan(
+#           nn.OptimizedLSTMCell,
+#           variable_broadcast='params',
+#           split_rngs={'params': False},
+#           in_axes=1,
+#           out_axes=1,
+#       )(self.hidden_size)
+#       init_carry = cell.initialize_carry(dummy_rng, xs[:, 0, :].shape)
+#       _, xs = cell(init_carry, xs)
+#     return xs
