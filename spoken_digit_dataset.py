@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torchfsdd  
+import last_torch
 
 from torch import nn
 from torch.utils.data import Dataset
@@ -101,4 +102,62 @@ class Encoder(nn.Module):
         
         # Return final encoded output
         return self.lstm(xs)[0]
+
+class Model(nn.Module):
+    def __init__(self, 
+                 locally_normalize:bool=False,
+                 hidden_size:int=256,
+                 num_encoder_layers:int=1,
+                 # As convention in LAST, we do not count the blank (0) label in the vocab.
+                 vocab_size:int=26,
+                 context_size:int=2,
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.locally_normalize = locally_normalize
+        self.hidden_size = hidden_size
+        self.num_encoder_layers = num_encoder_layers
+        self.vocab_size = vocab_size
+        self.context_size = context_size
+
+        self.encoder = Encoder(
+            self.hidden_size, self.num_encoder_layers
+        )
+    
+        def weight_fn_cacher_factory(context):
+            assert isinstance(context, last_torch.contexts.FullNGram)
+            return last_torch.weight_fns.SharedRNNCacher(
+                vocab_size=self.vocab_size,
+                context_size=self.context_size,
+                rnn_size=self.hidden_size,
+                rnn_embedding_size=self.hidden_size
+            )
         
+        def weight_fn_factory(context):
+            _, vocab_size = context.shape()
+            weight_fn = last_torch.weight_fns.JointWeightFn(
+                vocab_size=self.vocab_size,
+                hidden_size=self.hidden_size
+            )
+            if self.locally_normalize:
+                weight_fn = last_torch.weight_fns.LocallyNormalizedWeightFn(
+                    weight_fn
+                )
+            return weight_fn
+        
+        # Plug in all the pieces for the lattice
+        self.lattice = last_torch.RecognitionLattice(
+            context=last_torch.contexts.FullNGram(
+                vocab_size=self.vocab_size,
+                context_size=self.context_size
+            ),
+            alignment=last_torch.alignments.FrameDependent(),
+            weight_fn_cacher_factory=weight_fn_cacher_factory,
+            weight_fn_factory=weight_fn_factory
+        )
+    
+    def forward(self, batch:torch.Tensor) -> torch.Tensor:
+        pass
+
+    def decode(self, batch:torch.Tensor) -> torch.Tensor:
+        pass
