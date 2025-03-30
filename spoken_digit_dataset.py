@@ -1,11 +1,21 @@
 import torch
+import os
 import numpy as np
 import torchfsdd  
 import last_torch
 
 from torch import nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, Subset
 from torchaudio.transforms import MFCC
+
+'''
+Translation from the LAST quick start notebook over to
+last_torch.
+
+Notes:
+    - Currently am not filtering for long files via max_num_frames
+
+'''
 
 '''
 HELPER FUNCTIONS
@@ -69,8 +79,9 @@ def slice_and_process_dataset(
         n_mfcc=n_mfcc
     ) 
     fsdd_dataset = torchfsdd.TorchFSDD(files=files, transforms=transform)
-    return fsdd_dataset[1000:], fsdd_dataset[:1000]
-
+    test_subset = Subset(fsdd_dataset, [i for i in range(0,1000)])
+    train_subset = Subset(fsdd_dataset, [i for i in range(1000,len(fsdd_dataset))])
+    return train_subset, test_subset
 
 '''
 MODEL DEFINITIONS
@@ -86,10 +97,10 @@ class Encoder(nn.Module):
         """Encode the inputs.
         
         Args:
-            xs: [batch_size, max_num_frames, feature_size] input sequences
+            xs: [batch_size, num_frames, feature_size] input sequences
 
         Returns:
-            [batch_size, max_num_frames, hidden_size] output sequences.
+            [batch_size, num_frames, hidden_size] output sequences.
         """
         input_size = xs.shape[-1]
 
@@ -161,3 +172,36 @@ class Model(nn.Module):
 
     def decode(self, batch:torch.Tensor) -> torch.Tensor:
         pass
+
+'''
+TRAIN AND EVAL LOOP
+'''
+
+def train_and_eval(test_batch, 
+                   train_batches, 
+                   model, optim,
+                   batch_size,
+                   num_steps, 
+                   num_steps_per_eval
+                   ):
+
+    test_set = DataLoader(test_batch)
+    train_set = DataLoader(train_batches, batch_size)
+    pass
+
+
+'''
+CORE CODE HERE
+'''
+
+PATH_TO_RECORDINGS = 'free-spoken-digit-dataset/recordings'
+files = [os.path.join(PATH_TO_RECORDINGS, file) for file in os.listdir(PATH_TO_RECORDINGS)]
+
+TRAIN_BATCHES, TEST_BATCH = slice_and_process_dataset(
+    files = files 
+)
+
+for locally_normalize in [True, False]:
+    model = Model(locally_normalize=locally_normalize)
+    optim = torch.optim.AdamW(model.parameters())
+    train_and_eval(TEST_BATCH, TRAIN_BATCHES, model, optim, 1000, 100)
