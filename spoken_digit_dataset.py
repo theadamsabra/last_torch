@@ -1,7 +1,8 @@
 import torch
 import numpy as np
-import torchaudio
 import torchfsdd  
+from torch.utils.data import Dataset
+from torchaudio.transforms import MFCC
 
 
 def make_text_labels(int_label: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -33,3 +34,34 @@ def make_text_labels(int_label: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
         ).to(torch.int32)
     num_labels = labels.shape[0].to(torch.int32)
     return labels, num_labels
+
+
+def slice_and_process_dataset(
+        files:list[str], 
+        sample_rate:int=8000, 
+        n_mfcc:int=80) -> tuple[Dataset, Dataset]:
+    """Load and process FSDD using torch-fsdd. We will slice the 
+    first 1000 files for evaluation, and use the rest for training.
+
+    Args:
+        files (list[str]): list of filepaths to dataset.
+            Note: '.wav' in files[i] == True
+        
+        sample_rate (int): sampling rate of files. default to 8000 Hz
+        as that is the sampling rate for the recordings.
+
+        n_mfcc (int): number of MFCCs to calculate for feature extraction.
+        default set to 80 to align with quick start notebook in JAX.
+    
+    Returns:
+        train_dataset (Dataset): training slice of dataset (files 1001-N.)
+
+        test_dataset (Dataset): test slice of dataset (first 1000 files.)
+    """
+    # Construct MFCC transformation and apply to dataset
+    transform = MFCC(
+        sample_rate=sample_rate,
+        n_mfcc=n_mfcc
+    ) 
+    fsdd_dataset = torchfsdd.TorchFSDD(files=files, transforms=transform)
+    return fsdd_dataset[1000:], fsdd_dataset[:1000]
