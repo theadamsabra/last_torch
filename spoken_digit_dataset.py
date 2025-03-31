@@ -1,7 +1,7 @@
 import torch
 import os
 import numpy as np
-import torchfsdd  
+from torchfsdd_dataset import TorchFSDD
 import last_torch
 
 from torchvision.transforms import Compose
@@ -20,7 +20,7 @@ class PadOrTrim:
     sake.
 
     Args:
-        pad_length (int): length to pad to.
+        max_num_frames (int): length to pad to.
     """
     def __init__(self, max_num_frames:int):
         self.max_num_frames = max_num_frames
@@ -37,7 +37,7 @@ class PadOrTrim:
             #    right pad on second dim
             #             |
             #             V
-            pad_tuple = (0,shape_diff, 0,0)
+            pad_tuple = (0,shape_diff, 0,0) # why pytorch, why?
             #                           ^
             #                           |
             #                       no pad first dim
@@ -47,7 +47,7 @@ class PadOrTrim:
 '''
 HELPER FUNCTIONS
 '''
-def make_text_labels(int_label: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def make_text_labels(int_label: int, max_num_labels:int=5) -> tuple[torch.Tensor, torch.Tensor]:
     """Converts class labels into text.
 
     Args:
@@ -71,10 +71,13 @@ def make_text_labels(int_label: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
     'eight',
     'nine',
 ])
-    labels = torch.from_numpy(
-            np.char.decode(vocab[int_label], 'ascii') - ord('a') + 1
-        ).to(torch.int32)
-    num_labels = labels.shape[0].to(torch.int32)
+    word = vocab[int_label]
+    labels = torch.Tensor([ord(letter) - ord('a') + 1 for letter in word]).to(torch.int32)
+    num_labels = labels.shape[0]
+    label_diff = max_num_labels - num_labels
+    if label_diff > 0:
+        labels = torch.nn.functional.pad(labels, (0,label_diff))
+
     return labels, num_labels
 
 
@@ -122,7 +125,8 @@ def slice_and_process_dataset(
         PadOrTrim(max_num_frames)
     ])
     # Load in files with the necessary transformations
-    fsdd_dataset = torchfsdd.TorchFSDD(files=files, transforms=transform)
+    fsdd_dataset = TorchFSDD(files=files, transforms=transform, 
+                                       label_transform=make_text_labels)
 
     # Construct subset for simple experimentation
     test_subset = Subset(fsdd_dataset, [i for i in range(0,1000)])
@@ -213,20 +217,15 @@ class Model(nn.Module):
             weight_fn_factory=weight_fn_factory
         )
     
-    def forward(self, batch:torch.Tensor) -> torch.Tensor:
+    def forward(self, input_tensor:torch.Tensor) -> torch.Tensor:
         pass
 
-    def decode(self, batch:torch.Tensor) -> torch.Tensor:
+    def decode(self, input_tensor:torch.Tensor) -> torch.Tensor:
         pass
 
 '''
 TRAIN AND EVAL LOOP
 '''
-def train_step():
-    pass
-
-def eval_step():
-    pass
 
 def training_loop(
     test_batch, 
@@ -257,8 +256,8 @@ def training_loop(
     train_set = DataLoader(train_batches, batch_size)
 
     # Core training loop:
-    for i, (batch, label) in enumerate(train_set):
-
+    for i, (batch, labels, num_labels) in enumerate(train_set):
+        # Permute batch
         batch = batch.to(device)
         batch = torch.permute(batch, (0,2,1))
 
