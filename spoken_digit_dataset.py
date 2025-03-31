@@ -4,6 +4,7 @@ import numpy as np
 import torchfsdd  
 import last_torch
 
+from torchvision.transforms import Compose
 from torch import nn
 from torch.utils.data import Dataset, DataLoader, Subset
 from torchaudio.transforms import MFCC
@@ -11,12 +12,38 @@ from torchaudio.transforms import MFCC
 '''
 Translation from the LAST quick start notebook over to
 last_torch.
-
-Notes:
-    - Currently am not filtering for long files via max_num_frames
-
 '''
 
+class PadOrTrim:
+    """Make torch pad into a class for easy composition of
+    transforms. Will also handle trimming for simplicities'
+    sake.
+
+    Args:
+        pad_length (int): length to pad to.
+    """
+    def __init__(self, max_num_frames:int):
+        self.max_num_frames = max_num_frames
+
+    def __call__(self, x:torch.Tensor):
+        """Applies padding transformation
+
+        Args:
+            x (torch.Tensor): tensor to be padded
+        """
+        shape_diff = self.max_num_frames - x.shape[-1]
+        
+        if shape_diff > 0:
+            #    right pad on second dim
+            #             |
+            #             V
+            pad_tuple = (0,shape_diff, 0,0)
+            #                           ^
+            #                           |
+            #                       no pad first dim
+            return torch.nn.functional.pad(x, pad_tuple)
+        else:
+            return x[:, :self.max_num_frames]
 '''
 HELPER FUNCTIONS
 '''
@@ -54,7 +81,11 @@ def make_text_labels(int_label: torch.Tensor) -> tuple[torch.Tensor, torch.Tenso
 def slice_and_process_dataset(
         files:list[str], 
         sample_rate:int=8000, 
-        n_mfcc:int=80) -> tuple[Dataset, Dataset]:
+        n_mfcc:int=80,
+        n_fft:int=512,
+        hop_length:int=160,
+        max_num_frames:int=30
+        ) -> tuple[Dataset, Dataset]:
     """Load and process FSDD using torch-fsdd. We will slice the 
     first 1000 files for evaluation, and use the rest for training.
 
@@ -68,17 +99,32 @@ def slice_and_process_dataset(
         n_mfcc (int): number of MFCCs to calculate for feature extraction.
         default set to 80 to align with quick start notebook in JAX.
     
-    Returns:
-        train_dataset (Dataset): training slice of dataset (files 1001-N.)
+        n_fft (int): FFT size for mel calculation. 
+        default set to 512 to align with quick start notebook in JAX.
 
-        test_dataset (Dataset): test slice of dataset (first 1000 files.)
+        hop_length (int): hop size for FFT/mel calculation
+        default set to 160 to align with quick start notebook in JAX.
+
+    Returns:
+        train_subset (Subset): train slice of dataset (file index 1000-end)
+        test_dataset (Subset): test slice of dataset (first 1000 files.)
     """
     # Construct MFCC transformation and apply to dataset
-    transform = MFCC(
-        sample_rate=sample_rate,
-        n_mfcc=n_mfcc
-    ) 
+    transform = Compose([
+        MFCC(
+            sample_rate=sample_rate,
+            n_mfcc=n_mfcc,
+            melkwargs={
+                "n_fft": n_fft,
+                "hop_length": hop_length
+            }
+        ),
+        PadOrTrim(max_num_frames)
+    ])
+    # Load in files with the necessary transformations
     fsdd_dataset = torchfsdd.TorchFSDD(files=files, transforms=transform)
+
+    # Construct subset for simple experimentation
     test_subset = Subset(fsdd_dataset, [i for i in range(0,1000)])
     train_subset = Subset(fsdd_dataset, [i for i in range(1000,len(fsdd_dataset))])
     return train_subset, test_subset
@@ -176,18 +222,47 @@ class Model(nn.Module):
 '''
 TRAIN AND EVAL LOOP
 '''
+def train_step():
+    pass
 
-def train_and_eval(test_batch, 
-                   train_batches, 
-                   model, optim,
-                   batch_size,
-                   num_steps, 
-                   num_steps_per_eval
-                   ):
+def eval_step():
+    pass
 
+def training_loop(
+    test_batch, 
+    train_batches, 
+    model, 
+    optim,
+    batch_size=128,
+    num_steps=1000, 
+    num_steps_per_eval=100,
+    device='cpu'
+    ):
+    '''Core training loop comprised of training and eval steps.
+    Very simple training loop for basic experimentation.
+
+    Args:
+        test_batch 
+        train_batches 
+        model 
+        optim
+        batch_size
+        num_steps 
+        num_steps_per_eval
+        device
+    '''
+    # Basic setup
+    model.to(device)
     test_set = DataLoader(test_batch)
     train_set = DataLoader(train_batches, batch_size)
-    pass
+
+    # Core training loop:
+    for i, (batch, label) in enumerate(train_set):
+
+        batch = batch.to(device)
+        batch = torch.permute(batch, (0,2,1))
+
+        output = model(batch)
 
 
 '''
@@ -204,4 +279,4 @@ TRAIN_BATCHES, TEST_BATCH = slice_and_process_dataset(
 for locally_normalize in [True, False]:
     model = Model(locally_normalize=locally_normalize)
     optim = torch.optim.AdamW(model.parameters())
-    train_and_eval(TEST_BATCH, TRAIN_BATCHES, model, optim, 1000, 100)
+    training_loop(TEST_BATCH, TRAIN_BATCHES, model, optim)
