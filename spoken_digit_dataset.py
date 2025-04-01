@@ -31,7 +31,8 @@ class PadOrTrim:
         Args:
             x (torch.Tensor): tensor to be padded
         """
-        shape_diff = self.max_num_frames - x.shape[-1]
+        num_frames = x.shape[-1]
+        shape_diff = self.max_num_frames - num_frames
         
         if shape_diff > 0:
             #    right pad on second dim
@@ -41,9 +42,9 @@ class PadOrTrim:
             #                           ^
             #                           |
             #                       no pad first dim
-            return torch.nn.functional.pad(x, pad_tuple)
+            return torch.nn.functional.pad(x, pad_tuple), num_frames
         else:
-            return x[:, :self.max_num_frames]
+            return x[:, :self.max_num_frames], num_frames
 '''
 HELPER FUNCTIONS
 '''
@@ -217,15 +218,42 @@ class Model(nn.Module):
             weight_fn_factory=weight_fn_factory
         )
     
-    def forward(self, input_tensor:torch.Tensor) -> torch.Tensor:
-        pass
+    def forward(self,
+                input_data:torch.Tensor,
+                num_frames:torch.Tensor,
+                labels:torch.Tensor,
+                num_labels:torch.Tensor
+                ) -> torch.Tensor:
+        features = self.encoder(input_data)
+        return self.lattice(
+            frames=features,
+            num_frames=num_frames,
+            labels=labels,
+            num_labels=num_labels
+        ).mean()
 
-    def decode(self, input_tensor:torch.Tensor) -> torch.Tensor:
-        pass
+    def decode(self, 
+               input_tensor:torch.Tensor,
+               num_frames:torch.Tensor
+               ) -> torch.Tensor:
+        """Decodes batch into [batch_size, max_num_frames] alignment labels"""
+        features = self.encoder(input_tensor)
+        return self.lattice.shortest_path(
+            frames=features, num_frames=num_frames
+        )[0]
 
 '''
 TRAIN AND EVAL LOOP
 '''
+
+def train_step(input_data, num_frames, labels, num_labels, device):
+    # Permute input_data and get prediction
+    input_data = input_data.to(device)
+    input_data = torch.permute(input_data, (0,2,1))
+    return model(input_data, num_frames, labels, num_labels)
+
+def eval_step():
+    pass
 
 def training_loop(
     test_batch, 
@@ -252,16 +280,18 @@ def training_loop(
     '''
     # Basic setup
     model.to(device)
-    test_set = DataLoader(test_batch)
-    train_set = DataLoader(train_batches, batch_size)
+
+    train_set = DataLoader(train_batches, batch_size=batch_size)
+    test_set = DataLoader(test_batch, batch_size=len(test_batch)) # Evaluate on entire test set at once
 
     # Core training loop:
-    for i, (batch, labels, num_labels) in enumerate(train_set):
-        # Permute batch
-        batch = batch.to(device)
-        batch = torch.permute(batch, (0,2,1))
+    for i, ((input_data, num_frames), labels, num_labels) in enumerate(train_set):
 
-        output = model(batch)
+        output = train_step(input_data, num_frames, labels, num_labels, device)
+
+        # Evaluate every num_steps_per_eval
+        if i+1 % num_steps_per_eval == 0:
+            eval_step()
 
 
 '''

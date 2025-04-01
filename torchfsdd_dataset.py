@@ -1,7 +1,9 @@
 '''
+
 Slightly repurposed TorchFSDD from
     https://github.com/eonu/torch-fsdd/blob/master/lib/torchfsdd/dataset.py
-to make transforming the label easier for ASR as opposed to classification.
+to make transforming the label easier for ASR tasks as opposed to classification.
+
 '''
 
 import os, torch, torchaudio
