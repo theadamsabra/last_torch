@@ -254,6 +254,34 @@ TRAIN AND EVAL LOOP
 def eval_step():
     pass
 
+def remove_blank_labels(labels:torch.Tensor) -> torch.Tensor:
+    """Removes blank labels by pushing lexical labels forward."""
+
+    def remove_one(labels):
+        padded_labels = torch.nn.functional.pad(
+            labels, (1,0,0,0)
+        )
+        indices = torch.nonzero(padded_labels)
+        return padded_labels[indices]
+
+    return torch.vmap(remove_one)(labels)
+
+def sequence_accuracy(ref_labels:torch.Tensor, hyp_labels:torch.Tensor) -> torch.Tensor:
+    """Accuracy computed with exact match"""
+    hyp_labels = remove_blank_labels(hyp_labels)
+    # Pad sequences to be same shape for label-wise comparison
+    pad_len = max(ref_labels.shape[-1], hyp_labels.shape[-1])
+    hyp_labels = torch.nn.functional.pad(
+        hyp_labels,
+        (0, pad_len-hyp_labels.shape[-1], 0, 0)
+    )
+    ref_labels = torch.nn.functional.pad(
+        ref_labels,
+        (0, pad_len-ref_labels.shape[-1], 0, 0)
+    )
+    exact_match = (hyp_labels == ref_labels).all(dim=-1)
+    return exact_match.mean()
+
 def training_loop(
     test_batch, 
     train_batches, 
@@ -284,16 +312,24 @@ def training_loop(
     test_set = DataLoader(test_batch, batch_size=len(test_batch)) # Evaluate on entire test set at once
 
     # Core training loop:
-    for i, ((input_data, num_frames), labels, num_labels) in enumerate(train_set):
+    #    this is a tuple due to how we return it in our dataset
+    #               |
+    #               V
+    for i, ( (input_data, num_frames) , labels, num_labels) in enumerate(train_set):
+        optim.zero_grad()
 
         # Get output from network and optimize
         input_data = input_data.to(device)
         input_data = torch.permute(input_data, (0,2,1))
         output = model(input_data, num_frames, labels, num_labels)
-        #TODO: Add optimization to train step
 
+        # The lattice has a custom-defined backward.
+        # So we can directly call backward on the output!
+        output.backward()
 
-        # Evaluate every num_steps_per_eval
+        optim.step()
+
+        # evaluate every num_steps_per_eval
         if i+1 % num_steps_per_eval == 0:
             eval_step()
 
