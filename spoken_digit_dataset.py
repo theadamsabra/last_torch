@@ -14,6 +14,10 @@ Translation from the LAST quick start notebook over to
 last_torch.
 '''
 
+'''
+Augmentation for TorchFSDD dataset
+'''
+
 class PadOrTrim:
     """Make torch pad into a class for easy composition of
     transforms. Will also handle trimming for simplicities'
@@ -45,6 +49,7 @@ class PadOrTrim:
             return torch.nn.functional.pad(x, pad_tuple), num_frames
         else:
             return x[:, :self.max_num_frames], num_frames
+
 '''
 HELPER FUNCTIONS
 '''
@@ -246,12 +251,6 @@ class Model(nn.Module):
 TRAIN AND EVAL LOOP
 '''
 
-def train_step(input_data, num_frames, labels, num_labels, device):
-    # Permute input_data and get prediction
-    input_data = input_data.to(device)
-    input_data = torch.permute(input_data, (0,2,1))
-    return model(input_data, num_frames, labels, num_labels)
-
 def eval_step():
     pass
 
@@ -266,17 +265,17 @@ def training_loop(
     device='cpu'
     ):
     '''Core training loop comprised of training and eval steps.
-    Very simple training loop for basic experimentation.
+    Very simple loop for basic experimentation.
 
     Args:
-        test_batch 
-        train_batches 
-        model 
-        optim
-        batch_size
-        num_steps 
-        num_steps_per_eval
-        device
+        test_batch (Subset): test subset of the data
+        train_batches (Subset): train subset of the data
+        model (nn.Module): model to be trained.
+        optim (torch.optim): torch-based optimizer from torch.optim
+        batch_size (int): batch size for training. default is 128
+        num_steps (int): number of step for training. default is 1000
+        num_steps_per_eval (int): number of training steps before running on test set. default is 100
+        device (str): device to cast tensors/models to. default is "cpu"
     '''
     # Basic setup
     model.to(device)
@@ -287,7 +286,12 @@ def training_loop(
     # Core training loop:
     for i, ((input_data, num_frames), labels, num_labels) in enumerate(train_set):
 
-        output = train_step(input_data, num_frames, labels, num_labels, device)
+        # Get output from network and optimize
+        input_data = input_data.to(device)
+        input_data = torch.permute(input_data, (0,2,1))
+        output = model(input_data, num_frames, labels, num_labels)
+        #TODO: Add optimization to train step
+
 
         # Evaluate every num_steps_per_eval
         if i+1 % num_steps_per_eval == 0:
@@ -298,6 +302,8 @@ def training_loop(
 CORE CODE HERE
 '''
 
+#TODO: add README for setup
+# clone fsdd, refer to recordings dir, etc.
 PATH_TO_RECORDINGS = 'free-spoken-digit-dataset/recordings'
 files = [os.path.join(PATH_TO_RECORDINGS, file) for file in os.listdir(PATH_TO_RECORDINGS)]
 
