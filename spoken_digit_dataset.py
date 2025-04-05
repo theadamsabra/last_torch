@@ -251,7 +251,14 @@ class Model(nn.Module):
 TRAIN AND EVAL LOOP
 '''
 
-def eval_step():
+def eval_step(model:nn.Module, test_set:DataLoader):
+    """
+    Simple evaluation step on test set.
+
+    Args:
+        model (nn.Module): model being evaluated.
+        test_set (DataLoader): test subset of data
+    """
     pass
 
 def remove_blank_labels(labels:torch.Tensor) -> torch.Tensor:
@@ -326,12 +333,11 @@ def training_loop(
         # The lattice has a custom-defined backward.
         # So we can directly call backward on the output!
         output.backward()
-
         optim.step()
 
         # evaluate every num_steps_per_eval
         if i+1 % num_steps_per_eval == 0:
-            eval_step()
+            eval_step(model, test_set)
 
 
 '''
