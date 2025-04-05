@@ -261,7 +261,15 @@ class _LogAddExp(torch.autograd.Function):
     ctx.save_for_backward(ea, eb, z)
 
   @staticmethod
-  def backward(ctx, grad):
+  def backward(ctx, grad, filler_var):
+    '''
+    `filler_var` here is to mitigate any backward errors.
+    Because self.forward() returns two outputs,
+    self.backward() expects two inputs.
+
+    For more information:
+      https://discuss.pytorch.org/t/3-positional-arguments-in-backwards/16003/3
+    '''
     ea, eb, z = ctx.saved_tensors
     safe = z != 0
     z = torch.where(safe, z, 1)

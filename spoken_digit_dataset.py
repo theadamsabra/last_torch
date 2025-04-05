@@ -339,7 +339,11 @@ CORE CODE HERE
 '''
 
 #TODO: add README for setup
-# clone fsdd, refer to recordings dir, etc.
+# clone fsdd, 
+# refer to recordings dir, 
+# make sure soundfile is installed for torchaudio.load
+# etc.
+
 PATH_TO_RECORDINGS = 'free-spoken-digit-dataset/recordings'
 files = [os.path.join(PATH_TO_RECORDINGS, file) for file in os.listdir(PATH_TO_RECORDINGS)]
 
