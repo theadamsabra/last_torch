@@ -251,14 +251,26 @@ class Model(nn.Module):
 TRAIN AND EVAL LOOP
 '''
 
-def eval_step(model:nn.Module, test_set:DataLoader):
+@torch.no_grad()
+def eval_step(model:nn.Module, test_set:DataLoader) -> dict:
     """
     Simple evaluation step on test set.
 
     Args:
         model (nn.Module): model being evaluated.
         test_set (DataLoader): test subset of data
+    
+    Returns:
+        metrics (dict): dictionary of loss and accuracy metrics.
     """
+    # Yes it's ANOTHER loop, but remember:
+    # test_set's batch size is len(test_batch)
+    # i.e. we only iterate once.
+    for (input_data, num_frames) , labels, num_labels in test_set:
+        loss = model(input_data, num_frames, labels, num_labels)
+
+    hyp_labels = model.decode(input_data, num_frames)
+    accuracy = sequence_accuracy(labels, hyp_labels)
     pass
 
 def remove_blank_labels(labels:torch.Tensor) -> torch.Tensor:
@@ -318,26 +330,28 @@ def training_loop(
     train_set = DataLoader(train_batches, batch_size=batch_size)
     test_set = DataLoader(test_batch, batch_size=len(test_batch)) # Evaluate on entire test set at once
 
-    # Core training loop:
-    #    this is a tuple due to how we return it in our dataset
-    #               |
-    #               V
-    for i, ( (input_data, num_frames) , labels, num_labels) in enumerate(train_set):
-        optim.zero_grad()
+    for i in range(num_steps):
+        # Core training loop:
+        #    this is a tuple due to how we return it in our dataset
+        #               |
+        #               V
+        for (input_data, num_frames) , labels, num_labels in train_set:
+            optim.zero_grad()
 
-        # Get output from network and optimize
-        input_data = input_data.to(device)
-        input_data = torch.permute(input_data, (0,2,1))
-        output = model(input_data, num_frames, labels, num_labels)
+            # get output from network and optimize
+            input_data = input_data.to(device)
+            input_data = torch.permute(input_data, (0,2,1))
+            mean_log_z = model(input_data, num_frames, labels, num_labels)
 
-        # The lattice has a custom-defined backward.
-        # So we can directly call backward on the output!
-        output.backward()
-        optim.step()
+            # the lattice has a custom-defined backward.
+            # this means the output is the loss value itself.
+            # therefore, we can directly call backward on the output. 
+            mean_log_z.backward()
+            optim.step()
 
-        # evaluate every num_steps_per_eval
-        if i+1 % num_steps_per_eval == 0:
-            eval_step(model, test_set)
+            # evaluate every num_steps_per_eval
+            if (i+1 % num_steps_per_eval) == 0:
+                eval_step(model, test_set)
 
 
 '''
@@ -357,7 +371,8 @@ TRAIN_BATCHES, TEST_BATCH = slice_and_process_dataset(
     files = files 
 )
 
-for locally_normalize in [True, False]:
+for locally_normalize in [True]:
     model = Model(locally_normalize=locally_normalize)
     optim = torch.optim.AdamW(model.parameters())
-    training_loop(TEST_BATCH, TRAIN_BATCHES, model, optim)
+    training_loop(TEST_BATCH, TRAIN_BATCHES, model, optim, 
+                  num_steps_per_eval=1) # for debugging purposes
