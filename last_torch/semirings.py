@@ -96,12 +96,14 @@ class Semiring(Generic[T]):
   unimplemented (e.g. `prod`, is not commonly used).
   """
 
-  def zeros(self, shape: Sequence[int], dtype: Optional[DType] = None) -> T:
+  def zeros(self, shape: Sequence[int], dtype: Optional[DType] = None,
+            device: str = 'cpu') -> T:
     """Semiring zeros in the given shape and dtype.
 
-    Args:
-      shape: Desired output shape.
-      dtype: Optional PyTree of dtypes.
+      Args:
+        shape: Desired output shape.
+        dtype: Optional PyTree of dtypes.
+      device: Optional device type.
 
     Returns:
       If dtype is None, semiring zero values in the specified shape with
@@ -110,12 +112,14 @@ class Semiring(Generic[T]):
     """
     raise NotImplementedError
 
-  def ones(self, shape: Sequence[int], dtype: Optional[DType] = None) -> T:
+  def ones(self, shape: Sequence[int], dtype: Optional[DType] = None,
+           device : str = 'cpu') -> T:
     """Semiring ones in the given shape and dtype.
 
     Args:
       shape: Desired output shape.
       dtype: Optional PyTree of dtypes.
+      device: Optional device type.
 
     Returns:
       If dtype is None, semiring one values in the specified shape with
@@ -145,13 +149,14 @@ class _Real(Semiring[torch.Tensor]):
 
   @staticmethod
   def zeros(
-      shape: Sequence[int], dtype: Optional[DType] = None
+      shape: Sequence[int], dtype: Optional[DType] = None,
+      device: str = 'cpu'
   ) -> torch.Tensor:
-    return torch.zeros(shape, dtype=dtype)
+    return torch.zeros(shape, dtype=dtype, device=device)
   
   @staticmethod
-  def ones(shape: Sequence[int], dtype: Optional[DType] = None) -> torch.Tensor:
-    return torch.ones(shape, dtype=dtype)
+  def ones(shape: Sequence[int], dtype: Optional[DType] = None, device:str='cpu') -> torch.Tensor:
+    return torch.ones(shape, dtype=dtype, device=device)
   
   @staticmethod
   def times(a:torch.Tensor, b:torch.Tensor) -> torch.Tensor:
@@ -186,13 +191,14 @@ class _Log(Semiring[torch.Tensor]):
 
   @staticmethod
   def zeros(
-    shape: Sequence[int], dtype: Optional[DType] = None
+    shape: Sequence[int], dtype: Optional[DType] = None,
+    device : str = 'cpu'
   ) -> torch.Tensor:
-    return torch.full(shape, -torch.inf, dtype=dtype)
+    return torch.full(shape, -torch.inf, dtype=dtype, device=device)
 
   @staticmethod
-  def ones(shape: Sequence[int], dtype: Optional[DType] = None) -> torch.Tensor:
-    return torch.zeros(shape, dtype=dtype)
+  def ones(shape: Sequence[int], dtype: Optional[DType] = None, device: str = 'cpu') -> torch.Tensor:
+    return torch.zeros(shape, dtype=dtype, device=device)
   
   @staticmethod
   def times(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -217,7 +223,7 @@ class _Log(Semiring[torch.Tensor]):
     if dim < 0:
       dim += a.ndim
     result_shape = a.shape[:dim] + a.shape[dim + 1:]
-    return cls.zeros(result_shape, a.dtype)
+    return cls.zeros(result_shape, a.dtype, a.device)
 
 # Specialized log{add,sum}exp with safe gradients.
 #
@@ -322,13 +328,15 @@ class _MaxTropical(Semiring):
 
   @staticmethod
   def zeros(
-    shape: Sequence[int], dtype: Optional[DType] = None
+    shape: Sequence[int], dtype: Optional[DType] = None,
+    device : str = 'cpu'
   ) -> torch.Tensor:
-    return torch.full(shape, -torch.inf, dtype=dtype)
+    return torch.full(shape, -torch.inf, dtype=dtype, device=device)
 
   @staticmethod
-  def ones(shape: Sequence[int], dtype: Optional[DType] = None) -> torch.Tensor:
-    return torch.zeros(shape, dtype=dtype)
+  def ones(shape: Sequence[int], dtype: Optional[DType] = None,
+           device : str = 'cpu') -> torch.Tensor:
+    return torch.zeros(shape, dtype=dtype, device=device)
   
   @staticmethod
   def times(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -446,22 +454,24 @@ class Expectation(Generic[T, S], Semiring[tuple[T,S]]):
     return w, self.x.times(self.w_to_x(w), safe_v)
 
   def zeros(
-      self, shape: Sequence[int], dtype: Optional[DType] = None
+      self, shape: Sequence[int], dtype: Optional[DType] = None,
+      device : str = 'cpu'
   ) -> tuple[T, S]:
     if dtype is None:
       dtype_w = dtype_x = None
     else:
       dtype_w, dtype_x = dtype
-    return self.w.zeros(shape, dtype_w), self.x.zeros(shape, dtype_x)
+    return self.w.zeros(shape, dtype_w, device=device), self.x.zeros(shape, dtype_x, device=device)
   
   def ones(
-      self, shape: Sequence[int], dtype: Optional[DType] = None
+      self, shape: Sequence[int], dtype: Optional[DType] = None,
+      device : str = 'cpu'
   ) -> tuple[T, S]:
     if dtype is None:
       dtype_w = dtype_x = None
     else:
       dtype_w, dtype_x = dtype
-    return self.w.ones(shape, dtype_w), self.x.zeros(shape, dtype_x)
+    return self.w.ones(shape, dtype_w, device=device), self.x.zeros(shape, dtype_x, device=device)
   
   def times(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
     w_a, x_a = a
@@ -505,22 +515,24 @@ class Cartesian(Generic[T, S], Semiring[tuple[T, S]]):
   y: Semiring[S]
 
   def zeros(
-      self, shape: Sequence[int], dtype: Optional[DType] = None
+      self, shape: Sequence[int], dtype: Optional[DType] = None,
+      device : str = 'cpu'
   ) -> tuple[T, S]:
     if dtype is None:
       dtype_x = dtype_y = None
     else:
       dtype_x, dtype_y = dtype 
-    return self.x.zeros(shape, dtype_x), self.y.zeros(shape, dtype_y)
+    return self.x.zeros(shape, dtype_x, device=device), self.y.zeros(shape, dtype_y, device=device)
   
   def ones(
-      self, shape: Sequence[int], dtype: Optional[DType] = None
+      self, shape: Sequence[int], dtype: Optional[DType] = None,
+      device : str = 'cpu'
   ) -> tuple[T, S]:
     if dtype is None:
       dtype_x = dtype_y = None
     else:
       dtype_x, dtype_y = dtype 
-    return self.x.ones(shape, dtype_x), self.y.ones(shape, dtype_y)
+    return self.x.ones(shape, dtype_x, device=device), self.y.ones(shape, dtype_y, device=device)
   
   def times(self, a: tuple[T, S], b: tuple[T, S]) -> tuple[T, S]:
     a_x, a_y = a

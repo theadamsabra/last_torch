@@ -105,7 +105,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
                weight_fn_cacher_factory: Callable[[contexts.ContextDependency],
                                                   weight_fns.WeightFnCacher[T]],
                 weight_fn_factory: Callable[[contexts.ContextDependency],
-                                            weight_fns.WeightFn[T]]):
+                                            weight_fns.WeightFn[T]],
+                device:str = 'cpu'):
     super().__init__()
     self.context = context
     self.alignment = alignment
@@ -114,6 +115,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     self.weight_fn_cacher = self.weight_fn_cacher_factory(self.context)
     self.weight_fn = self.weight_fn_factory(self.context)
+    self.device = device
 
   def build_cache(self) -> T:
     """Builds the weight function cache.
@@ -169,11 +171,11 @@ class RecognitionLattice(nn.Module, Generic[T]):
     if cache is None:
       cache = self.weight_fn_cacher()
     numerator = self._string_forward(
-      cache = cache,
-      frames = frames,
-      num_frames = num_frames,
-      labels = labels,
-      num_labels = num_labels,
+      cache = cache.to(self.device),
+      frames = frames.to(self.device),
+      num_frames = num_frames.to(self.device),
+      labels = labels.to(self.device),
+      num_labels = num_labels.to(self.device),
       semiring = semiring)
     if isinstance(self.weight_fn, weight_fns.LocallyNormalizedWeightFn):
       return -numerator
@@ -232,7 +234,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
     
     _, vocab_size = self.context.shape()
     lexical_mask = torch.zeros(
-      [*batch_dims, max_num_frames, num_alignment_states, vocab_size]
+      [*batch_dims, max_num_frames, num_alignment_states, vocab_size],
+      device=self.device
     )
 
     path_weights, vjp_fn = torch.func.vjp(
@@ -320,7 +323,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
       # weights are for labels [1, vocab_size], so y-1 are the corresponding
       # indicies. one_hot(-1) is safe (all zeros).
       y = make_safe_classes(y)
-      mask = torch.nn.functional.one_hot(y.long() - 1, weights.shape[-1])
+      mask = torch.nn.functional.one_hot(y.long() - 1, weights.shape[-1]).to(self.device)
       return torch.einsum('...TV,...V->...T', weights, mask.float())
 
     def weight_step(carry, inputs):
@@ -338,7 +341,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
         [labels, torch.ones_like(labels[..., :1])], dim=-1)
     # [batch_dims..., max_num_frames, max_num_labels+1]
     blank_weight, lexical_weight = weight_step_scan(
-      weight_step, batch_dims, context_states, context_next_labels
+      weight_step, batch_dims, context_states, context_next_labels, self.device
     )
 
     # Dynamic program for summing up all alignment paths. Actual work is done by
@@ -370,9 +373,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
         (0, init_alpha),
         pytree.tree_map(
             functools.partial(_to_time_major, num_batch_dims=len(batch_dims)),
-            (blank_weight, lexical_weight))
+            (blank_weight, lexical_weight)),
+        self.device
         )
-    is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states)
+    is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states).to(self.device)
     return semiring.sum(
         torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
 
@@ -475,14 +479,15 @@ class RecognitionLattice(nn.Module, Generic[T]):
       return save
 
 
-    init_t = torch.Tensor([0])
+    init_t = torch.Tensor([0]).to(self.device)
     init_alpha = _init_context_state_weights(
         batch_dims=batch_dims,
         # TODO(wuke): Find a way to do this with jax.eval_shape.
         dtype=self.weight_fn(cache, frames[..., 0, :])[0].dtype,
         num_states=self.context.shape()[0],
         start=self.context.start(),
-        semiring=semiring)
+        semiring=semiring,
+        device=self.device)
     init_carry = (init_t, init_alpha)
 
     inputs = (frames, blank_mask, lexical_mask)
@@ -492,7 +497,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
     (_, alpha_T), alpha_0_to_T_minus_1 = scan_step_forward( 
         step,
         self.weight_fn, 
-        init_carry, inputs, in_dim, out_dim, self.alignment.num_states())
+        init_carry, inputs, in_dim, out_dim, self.alignment.num_states(),
+        device=self.device)
     return semiring.sum(alpha_T, dim=-1), alpha_0_to_T_minus_1
 
   def _forward_backward(self, cache: T, frames: torch.Tensor,
@@ -800,10 +806,13 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
 def _init_context_state_weights(
     batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
-    semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    semiring: semirings.Semiring[torch.Tensor],
+    device:str='cpu') -> torch.Tensor:
   is_start = torch.arange(num_states) == start
-  weights = torch.where(is_start, semiring.ones([], dtype),
-                      semiring.zeros([], dtype))
+  is_start = is_start.to(device) 
+
+  weights = torch.where(is_start, semiring.ones([], dtype, device),
+                      semiring.zeros([], dtype, device))
   return torch.broadcast_to(weights, (*batch_dims, num_states))
 
 
@@ -827,16 +836,16 @@ def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
   return torch.transpose(x, axes)
 
 
-def weight_step_scan(weight_step, batch_dims, context_states, context_next_labels):
+def weight_step_scan(weight_step, batch_dims, context_states, context_next_labels, device):
   assert context_states.shape == context_next_labels.shape
-  carry = torch.zeros(len(batch_dims))
-  blank_weight = torch.Tensor()
-  lexical_weight = torch.Tensor()
+  carry = torch.zeros(len(batch_dims)).to(device)
+  blank_weight = torch.Tensor().to(device)
+  lexical_weight = torch.Tensor().to(device)
 
   for last_dim_i in range(context_next_labels.shape[-1]):
     inputs = (
-      context_states[:, last_dim_i],
-      context_next_labels[:, last_dim_i]
+      context_states[:, last_dim_i].to(device),
+      context_next_labels[:, last_dim_i].to(device)
     )
     _, (blank_weight_i, lexical_weight_i) = weight_step(carry, inputs)
     blank_weight = torch.concat([blank_weight, blank_weight_i.unsqueeze(-1)], dim=-1)
@@ -844,36 +853,42 @@ def weight_step_scan(weight_step, batch_dims, context_states, context_next_label
 
   return blank_weight, lexical_weight
 
-def shortest_distance_step_scan(shortest_distance_step, init, xs):
+def shortest_distance_step_scan(shortest_distance_step, init, xs, device):
   t, alpha = init
   blank_weight, lexical_weight = xs
 
   for i in range(blank_weight.shape[0]):
-    (t, alpha), _ = shortest_distance_step((t, alpha), (blank_weight[i,:], lexical_weight[i,:]))
+    (t, alpha), _ = shortest_distance_step((t, 
+                                            alpha.to(device)), 
+
+                                           (blank_weight[i,:].to(device), 
+                                            lexical_weight[i,:].to(device))
+                                            )
 
   return (t, alpha), None
 
-def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, num_alignment_states=None):
+def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, num_alignment_states=None,
+                      device:str='cpu'):
   # WILL DO THE REFACTOR AND DOCUMENTATION AT END
   # I PROMISE !!!!
   t, alpha = init_carry
 
-  alpha_0_to_t_minus_1 = torch.tensor(())
+  alpha_0_to_t_minus_1 = torch.tensor((), device=device)
 
   # what is this code brother.
   frames, blank_mask, lexical_mask = inputs
   for i in range(frames.shape[in_dim]):
-    frame = torch.index_select(frames, in_dim, torch.tensor(i)).squeeze(in_dim)
+    frame = torch.index_select(frames, in_dim, torch.tensor(i).to(device)).squeeze(in_dim)
 
     if lexical_mask != None and blank_mask != None:
-      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
-      blank_mask_framed = torch.index_select(blank_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
+      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
+      blank_mask_framed = torch.index_select(blank_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
       (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
                                       (t, alpha),
                                       (frame, [blank_mask_framed], [lexical_mask_framed]))
     
     elif lexical_mask != None and blank_mask == None:
-      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
+      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
       (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
                                       (t, alpha),
                                       (frame, blank_mask, lexical_mask_framed))
