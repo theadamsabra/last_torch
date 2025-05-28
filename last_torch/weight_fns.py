@@ -203,14 +203,14 @@ class JointWeightFn(WeightFn[torch.Tensor]):
       cache: torch.Tensor,
       frame: torch.Tensor,
       state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
-    context_embeddings = cache
-    context_embeddings.to(self.device)
+
+    context_embeddings = cache.to(self.device)
 
     if state is None:
       frame = torch.unsqueeze(frame, 1).to(self.device) 
     else:
       context_embeddings = torch.index_select(context_embeddings, dim=0,
-                                              index=state.long().to(self.device))
+                                              index=state.long())
 
     context_projection = nn.Linear(context_embeddings.shape[-1], 
                                    self.hidden_size, bias=False, device=self.device)
@@ -304,7 +304,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
         )
       parts.append(cell_state)
     
-    return torch.concatenate(parts, dim=0)
+    return torch.concatenate(parts, dim=0).to(self.device)
 
 
 class NullCacher(WeightFnCacher[type(None)]):

@@ -144,10 +144,11 @@ MODEL DEFINITIONS
 '''
 class Encoder(nn.Module):
     """A stack of unidirectional LSTMs."""
-    def __init__(self, hidden_size:int, num_layers:int, *args, **kwargs):
+    def __init__(self, hidden_size:int, num_layers:int, device:str='cpu', *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.device = device
 
     def forward(self, xs:torch.Tensor):
         """Encode the inputs.
@@ -164,7 +165,8 @@ class Encoder(nn.Module):
         self.lstm = nn.LSTM(
             input_size=input_size,
             hidden_size=self.hidden_size,
-            num_layers=self.num_layers # We can do stacked LSTM with this param
+            num_layers=self.num_layers, # We can do stacked LSTM with this param
+            device=self.device
         )
         
         # Return final encoded output
@@ -178,6 +180,7 @@ class Model(nn.Module):
                  # As convention in LAST, we do not count the blank (0) label in the vocab.
                  vocab_size:int=26,
                  context_size:int=2,
+                 device:str='cpu',
                  *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -186,9 +189,10 @@ class Model(nn.Module):
         self.num_encoder_layers = num_encoder_layers
         self.vocab_size = vocab_size
         self.context_size = context_size
+        self.device = device
 
         self.encoder = Encoder(
-            self.hidden_size, self.num_encoder_layers
+            self.hidden_size, self.num_encoder_layers, self.device
         )
     
         def weight_fn_cacher_factory(context):
@@ -197,18 +201,21 @@ class Model(nn.Module):
                 vocab_size=self.vocab_size,
                 context_size=self.context_size,
                 rnn_size=self.hidden_size,
-                rnn_embedding_size=self.hidden_size
+                rnn_embedding_size=self.hidden_size,
+                device=self.device
             )
         
         def weight_fn_factory(context):
             _, vocab_size = context.shape()
             weight_fn = last_torch.weight_fns.JointWeightFn(
-                vocab_size=self.vocab_size,
-                hidden_size=self.hidden_size
+                vocab_size=vocab_size,
+                hidden_size=self.hidden_size,
+                device=self.device
             )
             if self.locally_normalize:
                 weight_fn = last_torch.weight_fns.LocallyNormalizedWeightFn(
-                    weight_fn
+                    weight_fn,
+                    device=self.device
                 )
             return weight_fn
         
@@ -216,11 +223,13 @@ class Model(nn.Module):
         self.lattice = last_torch.RecognitionLattice(
             context=last_torch.contexts.FullNGram(
                 vocab_size=self.vocab_size,
-                context_size=self.context_size
+                context_size=self.context_size,
+                device=self.device
             ),
             alignment=last_torch.alignments.FrameDependent(),
             weight_fn_cacher_factory=weight_fn_cacher_factory,
-            weight_fn_factory=weight_fn_factory
+            weight_fn_factory=weight_fn_factory,
+            device=self.device
         )
     
     def forward(self,
@@ -263,14 +272,22 @@ def eval_step(model:nn.Module, test_set:DataLoader) -> dict:
     Returns:
         metrics (dict): dictionary of loss and accuracy metrics.
     """
-    # Yes it's ANOTHER loop, but remember:
-    # test_set's batch size is len(test_batch)
-    # i.e. we only iterate once.
-    for (input_data, num_frames) , labels, num_labels in test_set:
-        loss = model(input_data, num_frames, labels, num_labels)
+    losses = []
+    accuracies = []
 
-    hyp_labels = model.decode(input_data, num_frames)
-    accuracy = sequence_accuracy(labels, hyp_labels)
+    for (input_data, num_frames) , labels, num_labels in test_set:
+        input_data = input_data.to(model.device)
+        num_frames = num_frames.to(model.device)
+        labels = labels.to(model.device)
+        num_labels = num_labels.to(model.device)
+
+        loss = model(input_data, num_frames, labels, num_labels)
+        losses.append(loss)
+
+        hyp_labels = model.decode(input_data, num_frames)
+        accuracy = sequence_accuracy(labels, hyp_labels)
+        accuracies.append(accuracy)
+
     pass
 
 def remove_blank_labels(labels:torch.Tensor) -> torch.Tensor:
@@ -278,12 +295,12 @@ def remove_blank_labels(labels:torch.Tensor) -> torch.Tensor:
 
     def remove_one(labels):
         padded_labels = torch.nn.functional.pad(
-            labels, (1,0,0,0)
+            labels, (1,0, 0,0)
         )
         indices = torch.nonzero(padded_labels)
         return padded_labels[indices]
 
-    return torch.vmap(remove_one)(labels)
+    return remove_one(labels)
 
 def sequence_accuracy(ref_labels:torch.Tensor, hyp_labels:torch.Tensor) -> torch.Tensor:
     """Accuracy computed with exact match"""
@@ -328,7 +345,7 @@ def training_loop(
     model.to(device)
 
     train_set = DataLoader(train_batches, batch_size=batch_size)
-    test_set = DataLoader(test_batch, batch_size=len(test_batch)) # Evaluate on entire test set at once
+    test_set = DataLoader(test_batch, batch_size=batch_size)
 
     for i in range(num_steps):
         # Core training loop:
@@ -339,14 +356,17 @@ def training_loop(
             optim.zero_grad()
 
             # get output from network and optimize
-            input_data = input_data.to(device)
-            input_data = torch.permute(input_data, (0,2,1))
-            mean_log_z = model(input_data, num_frames, labels, num_labels)
+            input_data = input_data.to(model.device)
+            num_frames = num_frames.to(model.device)
+            labels = labels.to(model.device)
+            num_labels = num_labels.to(model.device)
+            # input_data = torch.permute(input_data, (0,2,1))
+            log_z = model(input_data, num_frames, labels, num_labels)
 
             # the lattice has a custom-defined backward.
             # this means the output is the loss value itself.
             # therefore, we can directly call backward on the output. 
-            mean_log_z.backward()
+            log_z.backward()
             optim.step()
 
             # evaluate every num_steps_per_eval
@@ -371,8 +391,11 @@ TRAIN_BATCHES, TEST_BATCH = slice_and_process_dataset(
     files = files 
 )
 
-for locally_normalize in [True]:
-    model = Model(locally_normalize=locally_normalize)
+DEVICE = 'cuda:0'
+
+for locally_normalize in [False]:
+    model = Model(locally_normalize=locally_normalize, device=DEVICE)
     optim = torch.optim.AdamW(model.parameters())
-    training_loop(TEST_BATCH, TRAIN_BATCHES, model, optim, 
-                  num_steps_per_eval=1) # for debugging purposes
+    training_loop(TEST_BATCH, TRAIN_BATCHES, model, optim,
+                 num_steps_per_eval=1,
+                device=DEVICE) # for debugging purposes
