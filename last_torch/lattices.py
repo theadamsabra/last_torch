@@ -692,13 +692,15 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
       @staticmethod
       def backward(ctx, grad_output, log_z_grad):
+        # TODO: Need to align shapes somewhere
         cache, frames, log_z, alpha_0_to_T_minus_1, = ctx.saved_tensors
+        g = torch.tensor([1.]).to(self.device)
 
         def vjp_callback(weight_vjp_fn, carry, blank_marginal, lexical_marginals):
           params_grad, cache_grad = carry
           cache_grad_t, frame_grad_t = weight_vjp_fn(
-              (torch.unsqueeze(grad_output, -1) * blank_marginal,
-              torch.unsqueeze(torch.unsqueeze(grad_output, -1), -1) * lexical_marginals))
+              (torch.unsqueeze(g, -1) * blank_marginal,
+              torch.unsqueeze(torch.unsqueeze(g, -1), -1) * lexical_marginals))
 
           next_carry = optree.tree_map(torch.add, (params_grad, cache_grad),
                                               (params_grad, cache_grad_t))
@@ -719,8 +721,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
           init_callback_carry,
           vjp_callback
         )
-        return frames_grad.T
-        # return cache_grad[-1], frames_grad[-1]
+        return cache_grad[0], frames_grad[0].T
 
     fwd_bwd = ForwardBackward.apply
     return fwd_bwd(cache, frames)
