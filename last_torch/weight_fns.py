@@ -197,6 +197,12 @@ class JointWeightFn(WeightFn[torch.Tensor]):
     self.vocab_size = vocab_size
     self.hidden_size = hidden_size
     self.device = device
+    
+    # Projections will be lazily initialized on first forward call
+    self.context_projection = None
+    self.blank_projection = None
+    self.joint_projection_to_blank = None
+    self.joint_projection_to_vocab = None
 
   def forward(
       self,
@@ -212,25 +218,29 @@ class JointWeightFn(WeightFn[torch.Tensor]):
       context_embeddings = torch.index_select(context_embeddings, dim=0,
                                               index=state.long())
 
-    context_projection = nn.Linear(context_embeddings.shape[-1], 
-                                   self.hidden_size, bias=False, device=self.device)
-    blank_projection = nn.Linear(frame.shape[-1], self.hidden_size,
-                                 bias=False, device=self.device)
+    # Lazily initialize projections on first call
+    if self.context_projection is None:
+      self.context_projection = nn.Linear(context_embeddings.shape[-1], 
+                                          self.hidden_size, bias=False, device=self.device)
+    if self.blank_projection is None:
+      self.blank_projection = nn.Linear(frame.shape[-1], self.hidden_size,
+                                        bias=False, device=self.device)
 
-    # TODO: will follow the projection as shown in the JAX implementation.
-    # Speak to Ke later if changes are made and track as needed.
-    projected_context_embeddings = context_projection(context_embeddings)
-    projected_frame = blank_projection(frame)
+    projected_context_embeddings = self.context_projection(context_embeddings)
+    projected_frame = self.blank_projection(frame)
 
     joint = F.tanh(projected_context_embeddings + projected_frame)
 
-    joint_projection_to_blank = nn.Linear(joint.shape[-1], 1, device=self.device)
-    joint_projection_to_vocab = nn.Linear(joint.shape[-1], self.vocab_size, device=self.device)
+    # Lazily initialize output projections
+    if self.joint_projection_to_blank is None:
+      self.joint_projection_to_blank = nn.Linear(joint.shape[-1], 1, device=self.device)
+    if self.joint_projection_to_vocab is None:
+      self.joint_projection_to_vocab = nn.Linear(joint.shape[-1], self.vocab_size, device=self.device)
 
     blank = torch.squeeze(
-      joint_projection_to_blank(joint), dim=-1
+      self.joint_projection_to_blank(joint), dim=-1
     )
-    lexical = joint_projection_to_vocab(joint)
+    lexical = self.joint_projection_to_vocab(joint)
     return blank, lexical
 
 

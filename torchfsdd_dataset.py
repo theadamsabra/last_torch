@@ -6,7 +6,8 @@ to make transforming the label easier for ASR tasks as opposed to classification
 
 '''
 
-import os, torch, torchaudio
+import os, torch
+import soundfile as sf
 
 class TorchFSDD(torch.utils.data.Dataset):
     """A :class:`torch:torch.utils.data.Dataset` wrapper for specified
@@ -71,7 +72,9 @@ class TorchFSDD(torch.utils.data.Dataset):
         self.label_transform = label_transform
         self.args = args
 
-        get_audio = lambda file: torchaudio.load(file, **self.args)[0]
+        def get_audio(file):
+            data, sr = sf.read(file)
+            return torch.from_numpy(data).float().unsqueeze(0)  # Add channel dim
         get_label = lambda file: int(os.path.basename(file)[0])
 
         if load_all:

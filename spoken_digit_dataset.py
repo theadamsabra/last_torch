@@ -149,6 +149,7 @@ class Encoder(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.device = device
+        self.lstm = None  # Lazy initialization
 
     def forward(self, xs:torch.Tensor):
         """Encode the inputs.
@@ -161,13 +162,14 @@ class Encoder(nn.Module):
         """
         input_size = xs.shape[-1]
 
-        # Make it an attribute so we can access it for later analysis
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=self.hidden_size,
-            num_layers=self.num_layers, # We can do stacked LSTM with this param
-            device=self.device
-        )
+        # Lazily initialize LSTM on first call
+        if self.lstm is None:
+            self.lstm = nn.LSTM(
+                input_size=input_size,
+                hidden_size=self.hidden_size,
+                num_layers=self.num_layers,
+                device=self.device
+            )
         
         # Return final encoded output
         return self.lstm(xs)[0]
@@ -324,7 +326,7 @@ def training_loop(
     model, 
     optim,
     batch_size=128,
-    num_steps=1000, 
+    num_steps=5,  # Quick iteration
     num_steps_per_eval=100,
     device='cpu'
     ):
@@ -352,7 +354,8 @@ def training_loop(
         #    this is a tuple due to how we return it in our dataset
         #               |
         #               V
-        for (input_data, num_frames) , labels, num_labels in train_set:
+        batch_losses = []
+        for batch_idx, ((input_data, num_frames) , labels, num_labels) in enumerate(train_set):
             optim.zero_grad()
 
             # get output from network and optimize
@@ -360,18 +363,28 @@ def training_loop(
             num_frames = num_frames.to(model.device)
             labels = labels.to(model.device)
             num_labels = num_labels.to(model.device)
-            # input_data = torch.permute(input_data, (0,2,1))
+            
             log_z = model(input_data, num_frames, labels, num_labels)
 
             # the lattice has a custom-defined backward.
             # this means the output is the loss value itself.
             # therefore, we can directly call backward on the output. 
             log_z.backward()
+            
+            # Check gradient norm
+            total_norm = sum(p.grad.norm().item() ** 2 for p in model.parameters() if p.grad is not None) ** 0.5
+            
             optim.step()
+            batch_losses.append(log_z.item())
+            
+            if batch_idx == 0:
+                print(f'Step {i}, Batch 0: loss={log_z.item():.4f}, grad_norm={total_norm:.4f}')
 
             # evaluate every num_steps_per_eval
             if (i+1 % num_steps_per_eval) == 0:
                 eval_step(model, test_set)
+        
+        print(f'Step {i} avg loss: {sum(batch_losses)/len(batch_losses):.4f}')
 
 
 '''
@@ -391,11 +404,21 @@ TRAIN_BATCHES, TEST_BATCH = slice_and_process_dataset(
     files = files 
 )
 
-DEVICE = 'cuda:0'
+DEVICE = 'cpu'
 
 for locally_normalize in [False]:
     model = Model(locally_normalize=locally_normalize, device=DEVICE)
-    optim = torch.optim.AdamW(model.parameters())
+    
+    # Warmup: do a dummy forward pass to initialize all lazy layers
+    # This ensures all parameters exist before creating the optimizer
+    dummy_loader = DataLoader(TRAIN_BATCHES, batch_size=2)
+    (dummy_input, dummy_num_frames), dummy_labels, dummy_num_labels = next(iter(dummy_loader))
+    with torch.no_grad():
+        _ = model(dummy_input.to(DEVICE), dummy_num_frames.to(DEVICE), 
+                  dummy_labels.to(DEVICE), dummy_num_labels.to(DEVICE))
+    
+    # Now create optimizer with all parameters
+    optim = torch.optim.AdamW(model.parameters(), lr=1e-3)
     training_loop(TEST_BATCH, TRAIN_BATCHES, model, optim,
-                 num_steps_per_eval=1,
+                 num_steps_per_eval=10000,  # Skip eval for now
                 device=DEVICE) # for debugging purposes

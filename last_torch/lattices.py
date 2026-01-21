@@ -170,7 +170,9 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     semiring = semirings.Log 
     if cache is None:
-      cache = self.weight_fn_cacher().to(self.device)
+      cache = self.weight_fn_cacher()
+      if cache is not None:
+        cache = cache.to(self.device)
     numerator = self._string_forward(
       cache = cache,
       frames = frames.to(self.device),
@@ -665,66 +667,25 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
   def _forward_backward(self, cache: T, frames: torch.Tensor,
                         num_frames: torch.Tensor) -> torch.Tensor:
-    """Shortest distance under the log semiring with gradients computed using the backward algorithm.
+    """Shortest distance under the log semiring with gradients computed via autograd.
 
     Args:
       cache: Weight function cache data.
       frames: [batch_dims..., max_num_frames, feature_size] padded frame
         sequences.
       num_frames: [batch_dims...] number of frames.
-      init_callback_carry: PyTree of initial carry value for the callback.
 
     Returns:
-      [batch_dims...] shortest distance.
+      (log_z, alpha_0_to_T_minus_1) tuple with gradients computed via autograd.
     """
-    class ForwardBackward(torch.autograd.Function):
-
-      @staticmethod
-      def forward(ctx, cache, frames):
-        log_z, alpha_0_to_T_minus_1 = self._forward(
-          cache=cache,
-          frames=frames,
-          num_frames=num_frames,
-          semiring=semirings.Log
-        )
-        ctx.save_for_backward(cache, frames, log_z, alpha_0_to_T_minus_1)
-        return log_z, alpha_0_to_T_minus_1
-
-      @staticmethod
-      def backward(ctx, grad_output, log_z_grad):
-        # TODO: Need to align shapes somewhere
-        cache, frames, log_z, alpha_0_to_T_minus_1, = ctx.saved_tensors
-        g = torch.tensor([1.]).to(self.device)
-
-        def vjp_callback(weight_vjp_fn, carry, blank_marginal, lexical_marginals):
-          params_grad, cache_grad = carry
-          cache_grad_t, frame_grad_t = weight_vjp_fn(
-              (torch.unsqueeze(g, -1) * blank_marginal,
-              torch.unsqueeze(torch.unsqueeze(g, -1), -1) * lexical_marginals))
-
-          next_carry = optree.tree_map(torch.add, (params_grad, cache_grad),
-                                              (params_grad, cache_grad_t))
-          outputs = frame_grad_t
-          return next_carry, outputs
-
-        # Zero accumulators of params_grad/cache_grad.
-        init_params_grad = optree.tree_map(torch.zeros_like, self.state_dict())
-        init_cache_grad = optree.tree_map(torch.zeros_like, cache)
-        init_callback_carry = init_params_grad, init_cache_grad
-
-        (_, cache_grad), frames_grad = self._backward(
-          cache,
-          frames,
-          num_frames,
-          log_z,
-          alpha_0_to_T_minus_1,
-          init_callback_carry,
-          vjp_callback
-        )
-        return cache_grad[0], frames_grad[0].T
-
-    fwd_bwd = ForwardBackward.apply
-    return fwd_bwd(cache, frames)
+    # Use standard _forward with autograd for gradient computation
+    # This ensures gradients flow to weight function parameters
+    return self._forward(
+        cache=cache,
+        frames=frames,
+        num_frames=num_frames,
+        semiring=semirings.Log
+    )
 
 
 def _init_context_state_weights(
@@ -830,16 +791,49 @@ def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, n
   return (t, alpha), alpha_0_to_t_minus_1 
 
 def scan_step_backward(scan_fn, init_carry, inputs, in_dim, out_dim, reverse):
+  '''
+  Backward scan function that handles arbitrary callback output structures.
+  
+  Args:
+      scan_fn: Step function that takes (carry, (alpha, frame)) and returns (new_carry, outputs)
+      init_carry: Initial carry state
+      inputs: Tuple of (alphas, frames) tensors
+      in_dim: Dimension to iterate over
+      out_dim: Output dimension for stacking
+      reverse: Whether to iterate in reverse order
+  
+  Returns:
+      Tuple of (final_carry, stacked_outputs) where stacked_outputs preserves
+      the structure of callback outputs (can be tensors, tuples, etc.)
+  '''
   alphas, frames = inputs
-  blank_marginals = torch.Tensor().to(frames.device)
-  lexical_marginals = torch.Tensor().to(frames.device)
+  outputs_list = []
 
-  for i in range(frames.shape[in_dim]):
+  # Iterate in reverse if specified
+  indices = range(frames.shape[in_dim] - 1, -1, -1) if reverse else range(frames.shape[in_dim])
+
+  for i in indices:
     frame = torch.index_select(frames, in_dim, torch.tensor(i).to(frames.device)).squeeze(in_dim)
     alpha = torch.index_select(alphas, in_dim, torch.tensor(i).to(frames.device)).squeeze(in_dim)
 
     init_carry, callback_outputs = scan_fn(init_carry, (alpha, frame))
-    blank_marginals = torch.cat((blank_marginals, callback_outputs[0].unsqueeze(1)), dim=out_dim)
-    lexical_marginals = torch.cat((lexical_marginals, callback_outputs[1].unsqueeze(1)), dim=out_dim)
 
-  return init_carry, (blank_marginals, lexical_marginals)
+    # Collect callback outputs (can be tensors, tuples, or any pytree structure)
+    if callback_outputs is not None:
+      outputs_list.append(callback_outputs)
+
+  # Reorder outputs to match original time order if we iterated in reverse
+  if reverse and outputs_list:
+    outputs_list = outputs_list[::-1]
+
+  # Stack outputs using pytree to handle arbitrary structures
+  if outputs_list:
+    # Use optree.tree_map to stack each leaf tensor along the time dimension
+    stacked_outputs = optree.tree_map(
+        lambda *xs: torch.stack(xs, dim=in_dim),
+        *outputs_list
+    )
+  else:
+    stacked_outputs = None
+
+  return init_carry, stacked_outputs

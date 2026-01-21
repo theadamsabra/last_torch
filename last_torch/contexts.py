@@ -286,6 +286,10 @@ class NextStateTable(ContextDependency):
       raise ValueError('next_state_table should be an int32 ndarray, but '
                        f'got dtype {self.next_state_table.dtype}')
   
+  @property
+  def device(self):
+    return self.next_state_table.device
+
   def shape(self) -> tuple[int, int]:
     return self.next_state_table.shape
   
