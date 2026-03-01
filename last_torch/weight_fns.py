@@ -157,17 +157,24 @@ class LocallyNormalizedWeightFn(WeightFn[T]):
   def __init__(self, weight_fn: WeightFn[T], 
                normalize: Callable[[torch.Tensor, torch.Tensor],
                       tuple[torch.Tensor, torch.Tensor]] = hat_normalize,
+                device: str = 'cpu',
                *args, **kwargs) -> None:
     super().__init__(*args, **kwargs)
     self.weight_fn = weight_fn
     self.normalize = normalize
+    self.device = device
 
   def forward(
       self,
       cache: T,
       frame: torch.Tensor,
       state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
-    blank, lexical = self.weight_fn(cache, frame, state)
+    if state != None:
+      state = state.to(self.device)
+
+    blank, lexical = self.weight_fn(cache.to(self.device),
+                                    frame.to(self.device), 
+                                    state)
     return self.normalize(blank, lexical)
 
 
@@ -190,40 +197,50 @@ class JointWeightFn(WeightFn[torch.Tensor]):
     self.vocab_size = vocab_size
     self.hidden_size = hidden_size
     self.device = device
+    
+    # Projections will be lazily initialized on first forward call
+    self.context_projection = None
+    self.blank_projection = None
+    self.joint_projection_to_blank = None
+    self.joint_projection_to_vocab = None
 
   def forward(
       self,
       cache: torch.Tensor,
       frame: torch.Tensor,
       state: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
-    context_embeddings = cache
-    context_embeddings.to(self.device)
+
+    context_embeddings = cache.to(self.device)
 
     if state is None:
-      frame = torch.unsqueeze(frame, 1) 
+      frame = torch.unsqueeze(frame, 1).to(self.device) 
     else:
       context_embeddings = torch.index_select(context_embeddings, dim=0,
                                               index=state.long())
 
-    context_projection = nn.Linear(context_embeddings.shape[-1], 
-                                   self.hidden_size, bias=False, device=self.device)
-    blank_projection = nn.Linear(frame.shape[-1], self.hidden_size,
-                                 bias=False, device=self.device)
+    # Lazily initialize projections on first call
+    if self.context_projection is None:
+      self.context_projection = nn.Linear(context_embeddings.shape[-1], 
+                                          self.hidden_size, bias=False, device=self.device)
+    if self.blank_projection is None:
+      self.blank_projection = nn.Linear(frame.shape[-1], self.hidden_size,
+                                        bias=False, device=self.device)
 
-    # TODO: will follow the projection as shown in the JAX implementation.
-    # Speak to Ke later if changes are made and track as needed.
-    projected_context_embeddings = context_projection(context_embeddings)
-    projected_frame = blank_projection(frame)
+    projected_context_embeddings = self.context_projection(context_embeddings)
+    projected_frame = self.blank_projection(frame)
 
     joint = F.tanh(projected_context_embeddings + projected_frame)
 
-    joint_projection_to_blank = nn.Linear(joint.shape[-1], 1, device=self.device)
-    joint_projection_to_vocab = nn.Linear(joint.shape[-1], self.vocab_size, device=self.device)
+    # Lazily initialize output projections
+    if self.joint_projection_to_blank is None:
+      self.joint_projection_to_blank = nn.Linear(joint.shape[-1], 1, device=self.device)
+    if self.joint_projection_to_vocab is None:
+      self.joint_projection_to_vocab = nn.Linear(joint.shape[-1], self.vocab_size, device=self.device)
 
     blank = torch.squeeze(
-      joint_projection_to_blank(joint), dim=-1
+      self.joint_projection_to_blank(joint), dim=-1
     )
-    lexical = joint_projection_to_vocab(joint)
+    lexical = self.joint_projection_to_vocab(joint)
     return blank, lexical
 
 
@@ -250,32 +267,38 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
   embedding table can be used with JointWeightFn.
   """
   def __init__(self, vocab_size: int, context_size: int, rnn_size: int, rnn_embedding_size:int,
-               rnn_cell: Optional[nn.RNNCellBase] = None, *args, **kwargs):
+               rnn_cell: Optional[nn.RNNCellBase] = None, device:str='cpu', *args, **kwargs):
     super().__init__(*args, **kwargs)
     self.vocab_size = vocab_size
     self.context_size = context_size
     self.rnn_size = rnn_size
     self.rnn_embedding_size = rnn_embedding_size
     self.rnn_cell = rnn_cell
-    self.embedding = nn.Embedding(self.vocab_size + 1, self.rnn_embedding_size)
+
+    self.device = device
+    self.embedding = nn.Embedding(self.vocab_size + 1, self.rnn_embedding_size, device=self.device)
 
   def _tile_rnn_state(self, state):
     return einops.repeat(state, 'n ... -> (n v) ...', v = self.vocab_size)
 
   def forward(self) -> torch.Tensor:
     if self.rnn_cell is None:
-      rnn_cell = nn.LSTMCell(self.rnn_embedding_size, self.rnn_size)
+      rnn_cell = nn.LSTMCell(self.rnn_embedding_size, self.rnn_size, device=self.device)
     else:
       rnn_cell = self.rnn_cell
 
     feed_cell_state = rnn_cell._get_name() == 'LSTMCell'
 
-    hidden_state, cell_state = rnn_cell(self.embedding(torch.Tensor([0]).long()))
+    hidden_state, cell_state = rnn_cell(
+      self.embedding(
+          torch.Tensor([0]).long().to(self.device)
+        )
+      )
     parts = [cell_state]
     inputs = None
     for i in range(self.context_size):
       if i == 0:
-        inputs = self.embedding(torch.arange(1, self.vocab_size + 1))
+        inputs = self.embedding(torch.arange(1, self.vocab_size + 1).to(self.device))
       else:
         inputs = einops.repeat(inputs, 'n ... -> (v n) ...', v=self.vocab_size)
 
@@ -291,7 +314,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
         )
       parts.append(cell_state)
     
-    return torch.concatenate(parts, dim=0)
+    return torch.concatenate(parts, dim=0).to(self.device)
 
 
 class NullCacher(WeightFnCacher[type(None)]):

@@ -119,13 +119,13 @@ class ContextDependency(abc.ABC):
       i > 0 is the state after observing labels[..., i - 1].
     """
     batch_dims = labels.shape[:-1]
-    start = torch.broadcast_to(torch.tensor(self.start()), 
+    start = torch.broadcast_to(torch.tensor(self.start(), device=self.device), 
                                batch_dims)
 
     # Define custom scan specifially for next step:
     def scan(f, init, xs):
       carry = init
-      ys = torch.Tensor()
+      ys = torch.Tensor().to(self.device)
       for x in xs:
         carry, y = f(carry, x)
         # Check if zero dimensional tensor to help with concatenation:
@@ -169,6 +169,7 @@ class FullNGram(ContextDependency):
 
   vocab_size: int
   context_size: int
+  device: str = 'cpu'
 
   def __post_init__(self):
     if self.vocab_size <= 0:
@@ -215,7 +216,7 @@ class FullNGram(ContextDependency):
     # ascending states, and those leading to the full context_size order states.
     next_accum_parts = []
     if self.context_size > 0:
-      next_accum_parts.append(semiring.zeros(batch_dims + (1,), weights.dtype))
+      next_accum_parts.append(semiring.zeros(batch_dims + (1,), weights.dtype, weights.device))
 
     num_states_going_into_ascending_states = sum(
         self.vocab_size**i for i in range(0, self.context_size - 1))
@@ -285,6 +286,10 @@ class NextStateTable(ContextDependency):
       raise ValueError('next_state_table should be an int32 ndarray, but '
                        f'got dtype {self.next_state_table.dtype}')
   
+  @property
+  def device(self):
+    return self.next_state_table.device
+
   def shape(self) -> tuple[int, int]:
     return self.next_state_table.shape
   

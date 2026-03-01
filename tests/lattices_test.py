@@ -287,71 +287,76 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
           ],
           rtol=1e-6)
 
-# TODO: Go back to this test:
-#
-#   def test_arc_marginals(self):
-#     # Test _backward() by computing arc marginals. This is a bit easier to debug
-#     # than the full-on forward-backward.
-#     vocab_size = 2
-#     context_size = 1
-#     lattice = last_torch.RecognitionLattice(
-#         context=last_torch.contexts.FullNGram(
-#             vocab_size=vocab_size, context_size=context_size),
-#         alignment=last_torch.alignments.FrameDependent(),
-#         weight_fn_cacher_factory=weight_fn_cacher_factory,
-#         weight_fn_factory=weight_fn_factory)
-#     frames = torch.rand([4, 6, 8])
-#     num_frames = torch.Tensor([6, 3, 2, 0])
-#     cache = lattice.build_cache()
+class ArcMarginalsTest(absltest.TestCase):
+  """Test arc marginals computation via _backward()."""
 
-#     # Compute expected marginals using autodiff.
-#     def forward(masks):
-#       blank_mask, lexical_mask = masks
-#       log_z, _ = lattice._forward(
-#           cache=cache,
-#           frames=frames,
-#           num_frames=num_frames,
-#           semiring=last_torch.semirings.Log,
-#           blank_mask=[blank_mask],
-#           lexical_mask=[lexical_mask])
-#       return torch.sum(log_z)
+  def test_arc_marginals(self):
+    # Test _backward() by computing arc marginals. This is a bit easier to debug
+    # than the full-on forward-backward.
+    vocab_size = 2
+    context_size = 1
+    lattice = last_torch.RecognitionLattice(
+        context=last_torch.contexts.FullNGram(
+            vocab_size=vocab_size, context_size=context_size),
+        alignment=last_torch.alignments.FrameDependent(),
+        weight_fn_cacher_factory=weight_fn_cacher_factory,
+        weight_fn_factory=weight_fn_factory)
+    frames = torch.rand([4, 6, 8])
+    num_frames = torch.Tensor([6, 3, 2, 0])
+    cache = lattice.build_cache()
 
-#     num_context_states, _ = lattice.context.shape()
-#     blank_mask = torch.zeros([*frames.shape[:-1], num_context_states])
-#     lexical_mask = torch.zeros(
-#         [*frames.shape[:-1], num_context_states, vocab_size])
-#     outputs = forward((blank_mask, lexical_mask))
-#     expected_marginals = torch.autograd.grad(outputs, (blank_mask, lexical_mask))
-#     # Compute marginals using _backward().
-#     def arc_marginals(frames, num_frames):
+    # Compute expected marginals using autodiff.
+    def forward(masks):
+      blank_mask, lexical_mask = masks
+      log_z, _ = lattice._forward(
+          cache=cache,
+          frames=frames,
+          num_frames=num_frames,
+          semiring=last_torch.semirings.Log,
+          blank_mask=[blank_mask],
+          lexical_mask=[lexical_mask])
+      return torch.sum(log_z)
 
-#       def arc_marginals_callback(weight_vjp_fn, carry, blank_marginal,
-#                                  lexical_marginals):
-#         del weight_vjp_fn
-#         del carry
-#         next_carry = None
-#         outputs = (blank_marginal, lexical_marginals)
-#         return next_carry, outputs
+    num_context_states, _ = lattice.context.shape()
+    blank_mask = torch.zeros([*frames.shape[:-1], num_context_states], requires_grad=True)
+    lexical_mask = torch.zeros(
+        [*frames.shape[:-1], num_context_states, vocab_size], requires_grad=True)
+    outputs = forward((blank_mask, lexical_mask))
+    expected_marginals = torch.autograd.grad(outputs, (blank_mask, lexical_mask))
 
-#       log_z, alpha_0_to_T_minus_1 = lattice._forward(  # pylint: disable=invalid-name
-#           cache=cache,
-#           frames=frames,
-#           num_frames=num_frames,
-#           semiring=last_torch.semirings.Log)
-#       _, (blank_marginal, lexical_marginals) = lattice._backward(
-#           cache=cache,
-#           frames=frames,
-#           num_frames=num_frames,
-#           log_z=log_z,
-#           alpha_0_to_T_minus_1=alpha_0_to_T_minus_1,
-#           init_callback_carry=None,
-#           callback=arc_marginals_callback)
-#       return blank_marginal, lexical_marginals
+    # Compute marginals using _backward().
+    def arc_marginals(frames, num_frames):
 
-#     actual_marginals = arc_marginals(frames, num_frames)
-#     pytree.tree_map(
-#         functools.partial(npt.assert_allclose, rtol=1e-3), actual_marginals,
-#         expected_marginals)
+      def arc_marginals_callback(weight_vjp_fn, carry, blank_marginal,
+                                 lexical_marginals):
+        del weight_vjp_fn
+        del carry
+        next_carry = None
+        outputs = (blank_marginal, lexical_marginals)
+        return next_carry, outputs
+
+      log_z, alpha_0_to_T_minus_1 = lattice._forward(
+          cache=cache,
+          frames=frames,
+          num_frames=num_frames,
+          semiring=last_torch.semirings.Log)
+      _, (blank_marginal, lexical_marginals) = lattice._backward(
+          cache=cache,
+          frames=frames,
+          num_frames=num_frames,
+          log_z=log_z,
+          alpha_0_to_T_minus_1=alpha_0_to_T_minus_1,
+          init_callback_carry=None,
+          callback=arc_marginals_callback)
+      return blank_marginal, lexical_marginals
+
+    actual_marginals = arc_marginals(frames, num_frames)
+    # Detach tensors for comparison
+    actual_marginals_detached = pytree.tree_map(lambda x: x.detach(), actual_marginals)
+    expected_marginals_detached = pytree.tree_map(lambda x: x.detach(), expected_marginals)
+    pytree.tree_map(
+        functools.partial(npt.assert_allclose, rtol=1e-3), actual_marginals_detached,
+        expected_marginals_detached)
 
   def test_forward_backward(self):
     vocab_size = 2

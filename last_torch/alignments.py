@@ -245,7 +245,7 @@ def shift_down(x:torch.Tensor,
     output[..., 0] = semiring zero.
   """
   return torch.concatenate(
-      [semiring.zeros((*x.shape[:-1], 1), x.dtype), x[..., :-1]], axis=-1)
+      [semiring.zeros((*x.shape[:-1], 1), x.dtype, x.device), x[..., :-1]], axis=-1)
 
 
 def check_num_weights(alignment: TimeSyncAlignmentLattice,

@@ -23,6 +23,7 @@ from torch import utils
 from torch._higher_order_ops import scan
 import torch.nn as nn
 import torch.utils._pytree as pytree 
+import optree
 
 from last_torch import alignments
 from last_torch import contexts
@@ -105,7 +106,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
                weight_fn_cacher_factory: Callable[[contexts.ContextDependency],
                                                   weight_fns.WeightFnCacher[T]],
                 weight_fn_factory: Callable[[contexts.ContextDependency],
-                                            weight_fns.WeightFn[T]]):
+                                            weight_fns.WeightFn[T]],
+                device:str = 'cpu'):
     super().__init__()
     self.context = context
     self.alignment = alignment
@@ -114,6 +116,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
     self.weight_fn_cacher = self.weight_fn_cacher_factory(self.context)
     self.weight_fn = self.weight_fn_factory(self.context)
+    self.device = device
 
   def build_cache(self) -> T:
     """Builds the weight function cache.
@@ -168,12 +171,14 @@ class RecognitionLattice(nn.Module, Generic[T]):
     semiring = semirings.Log 
     if cache is None:
       cache = self.weight_fn_cacher()
+      if cache is not None:
+        cache = cache.to(self.device)
     numerator = self._string_forward(
       cache = cache,
-      frames = frames,
-      num_frames = num_frames,
-      labels = labels,
-      num_labels = num_labels,
+      frames = frames.to(self.device),
+      num_frames = num_frames.to(self.device),
+      labels = labels.to(self.device),
+      num_labels = num_labels.to(self.device),
       semiring = semiring)
     if isinstance(self.weight_fn, weight_fns.LocallyNormalizedWeightFn):
       return -numerator
@@ -232,7 +237,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
     
     _, vocab_size = self.context.shape()
     lexical_mask = torch.zeros(
-      [*batch_dims, max_num_frames, num_alignment_states, vocab_size]
+      [*batch_dims, max_num_frames, num_alignment_states, vocab_size],
+      device=self.device
     )
 
     path_weights, vjp_fn = torch.func.vjp(
@@ -320,7 +326,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
       # weights are for labels [1, vocab_size], so y-1 are the corresponding
       # indicies. one_hot(-1) is safe (all zeros).
       y = make_safe_classes(y)
-      mask = torch.nn.functional.one_hot(y.long() - 1, weights.shape[-1])
+      mask = torch.nn.functional.one_hot(y.long() - 1, weights.shape[-1]).to(self.device)
       return torch.einsum('...TV,...V->...T', weights, mask.float())
 
     def weight_step(carry, inputs):
@@ -338,7 +344,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
         [labels, torch.ones_like(labels[..., :1])], dim=-1)
     # [batch_dims..., max_num_frames, max_num_labels+1]
     blank_weight, lexical_weight = weight_step_scan(
-      weight_step, batch_dims, context_states, context_next_labels
+      weight_step, batch_dims, context_states, context_next_labels, self.device
     )
 
     # Dynamic program for summing up all alignment paths. Actual work is done by
@@ -370,9 +376,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
         (0, init_alpha),
         pytree.tree_map(
             functools.partial(_to_time_major, num_batch_dims=len(batch_dims)),
-            (blank_weight, lexical_weight))
+            (blank_weight, lexical_weight)),
+        self.device
         )
-    is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states)
+    is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states).to(self.device)
     return semiring.sum(
         torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
 
@@ -475,14 +482,15 @@ class RecognitionLattice(nn.Module, Generic[T]):
       return save
 
 
-    init_t = torch.Tensor([0])
+    init_t = torch.Tensor([0]).to(self.device)
     init_alpha = _init_context_state_weights(
         batch_dims=batch_dims,
         # TODO(wuke): Find a way to do this with jax.eval_shape.
         dtype=self.weight_fn(cache, frames[..., 0, :])[0].dtype,
         num_states=self.context.shape()[0],
         start=self.context.start(),
-        semiring=semiring)
+        semiring=semiring,
+        device=self.device)
     init_carry = (init_t, init_alpha)
 
     inputs = (frames, blank_mask, lexical_mask)
@@ -492,154 +500,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
     (_, alpha_T), alpha_0_to_T_minus_1 = scan_step_forward( 
         step,
         self.weight_fn, 
-        init_carry, inputs, in_dim, out_dim, self.alignment.num_states())
+        init_carry, inputs, in_dim, out_dim, self.alignment.num_states(),
+        device=self.device)
     return semiring.sum(alpha_T, dim=-1), alpha_0_to_T_minus_1
 
-  def _forward_backward(self, cache: T, frames: torch.Tensor,
-                        num_frames: torch.Tensor) -> torch.Tensor:
-    """Shortest distance under the log semiring with gradients computed using the backward algorithm.
-
-    Args:
-      cache: Weight function cache data.
-      frames: [batch_dims..., max_num_frames, feature_size] padded frame
-        sequences.
-      num_frames: [batch_dims...] number of frames.
-      init_callback_carry: PyTree of initial carry value for the callback.
-
-    Returns:
-      [batch_dims...] shortest distance.
-    """
-    semiring = semirings.Log
-
-    class ForwardBackward(torch.autograd.Function):
-      @staticmethod
-      def forward(cache, frames):
-        log_z, alpha_0_to_T_minus_1 = self._forward(
-          cache=cache,
-          frames=frames,
-          num_frames=num_frames,
-          semiring=semiring
-        )
-        return log_z, alpha_0_to_T_minus_1
-
-      @staticmethod
-      def setup_context(ctx, inputs, output):
-        pass
-
-      @staticmethod
-      def backward(ctx, grad_output):
-        """Computes arc marginals under the log semiring using the backward algorithm.
-
-        Under the log semiring, arc weights can be viewed as unnormalized log
-        probabilities, and a conditional distribution over paths can be defined by
-        normalizing with respect to the exponentiated shortest distance (i.e. sum of
-        unnormalized path probabilities). The marginal probability of each arc can
-        then be computed with the backward algorithm.
-
-        Mathematically, under the log semiring, arc marginals are equal to the
-        gradients of shortest distance with respect to arc weights. The backward
-        algorithm offers a slightly more efficient method for computing these
-        gradients than reverse mode automatic differentiation with gradient
-        rematerialization:
-        -   Both methods compute the arc weights twice: once in the forward pass,
-            once in the backward pass.
-        -   Both methods carry out the "backward-broadcast" operation, i.e.
-            broadcasting the backward weights from a destination state to all source
-            states, once in the backward pass.
-        -   Autodiff carries out the "forward-reduce" operation, i.e. summing up
-            path weights to the same destination state, twice: once in the forward
-            pass, once in the backward pass.
-        -   Forward-backward only carries out the "forward-reduce" operation once,
-            in the forward pass.
-
-        In other words, forward-backward saves one "forward-reduce" operation. The
-        savings can be significant when the "forward-reduce" call is often
-        expensive, which is the main justification for all this added complexity.
-
-        Args:
-          cache: Weight function cache data.
-          frames: [batch_dims..., max_num_frames, feature_size] padded frame
-            sequences.
-          num_frames: [batch_dims...] number of frames.
-          log_z: [batch_dims...] shortest distance from _forward(). Under the log
-            semiring, the shortest distance is the log-normalizer, thus the name.
-          alpha_0_to_T_minus_1: [batch_dims..., max_num_frames, num_context_states]
-            forward weights from _forward().
-          callback: Callback used in the backward algorithm loop.
-
-        Returns:
-          (final_callback_carry, callback_outputs) tuple.
-        """
-        log_z, alpha_0_to_T_minus_1 = grad_output
-
-        batch_dims = num_frames.shape
-        if frames.shape[:-2] != batch_dims:
-          raise ValueError('frames and num_frames have different batch_dims: '
-                          f'{frames.shape[:-2]} vs {batch_dims}')
-        if log_z.shape != batch_dims:
-          raise ValueError('log_z and num_frames have different batch_dims: '
-                          f'{log_z.shape} vs {batch_dims}')
-        if alpha_0_to_T_minus_1.shape[:-2] != batch_dims:
-          raise ValueError(
-              'alpha_0_to_T_minus_1 and num_frames have different '
-              f'batch_dims: {alpha_0_to_T_minus_1.shape[:-2]} vs {batch_dims}')
-
-        def step(lattice, carry, inputs):
-          # beta: [batch_dims..., num_context_states]
-          t, beta, callback_carry = carry
-          # alpha: [batch_dims..., num_context_states]
-          # frame: [batch_dims..., hidden_size]
-          alpha, frame = inputs
-          # blank: [batch_dims..., num_context_states]
-          # lexical: [batch_dims..., num_context_states, vocab_size]
-          (blank, lexical), weight_vjp_fn = torch.func.vjp(
-              lambda lattice, cache, frame: lattice.weight_fn(cache, frame),
-              lattice, cache, frame)
-          # We currently only support alignment-state-invariant weights.
-          blank = [blank for _ in range(self.alignment.num_states())]
-          lexical = [lexical for _ in range(self.alignment.num_states())]
-          next_beta, blank_marginal, lexical_marginals = self.alignment.backward(
-              alpha=alpha,
-              blank=blank,
-              lexical=lexical,
-              beta=beta,
-              log_z=log_z,
-              context=self.context)
-          # We currently only support alignment-state-invariant weights.
-          blank_marginal = torch.sum(torch.stack(blank_marginal), axis=0)
-          lexical_marginals = torch.sum(torch.stack(lexical_marginals), axis=0)
-          # Mask out marginals on padding positions.
-          is_padding = (t >= num_frames)[..., torch.newaxis]
-          next_beta = torch.where(is_padding, beta, next_beta)
-          blank_marginal = torch.where(is_padding, 0, blank_marginal)
-          lexical_marginals = torch.where(is_padding[..., torch.newaxis], 0,
-                                        lexical_marginals)
-          next_callback_carry, callback_outputs = callback(
-              weight_vjp_fn=weight_vjp_fn,
-              carry=callback_carry,
-              blank_marginal=blank_marginal,
-              lexical_marginals=lexical_marginals)
-
-          return (t - 1, next_beta, next_callback_carry), callback_outputs
-
-
-        num_context_states, _ = self.context.shape()
-        init_beta = semirings.Log.ones([*batch_dims, num_context_states],
-                                      log_z.dtype)
-        init_t = torch.Tensor(frames.shape[-2] - 1)
-        init_carry = (init_t, init_beta, init_callback_carry)
-
-        inputs = (alpha_0_to_T_minus_1, frames)
-        (_, _, final_callback_carry), callback_outputs = scan_step_backward(
-            step,
-            init_carry, 
-            inputs
-        )
-
-        return final_callback_carry, callback_outputs
-
-    _fwd_bwd = ForwardBackward.apply    
-    return _fwd_bwd(cache, frames)
 
   class BackwardStepCallback(Protocol):
     """Callback signature used in the backward algorithm loop."""
@@ -789,7 +653,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
       init_beta = semirings.Log.ones([*batch_dims, num_context_states],
                                     log_z.dtype)
       init_t = torch.Tensor([frames.shape[-2] - 1])
-      init_carry = (init_t, init_beta, init_callback_carry)
+      init_carry = (init_t.to(self.device), 
+                    init_beta.to(self.device), 
+                    init_callback_carry
+                    )
 
       inputs = (alpha_0_to_T_minus_1, frames)
       (_, _, final_callback_carry), callback_outputs = scan_step_backward(
@@ -798,12 +665,38 @@ class RecognitionLattice(nn.Module, Generic[T]):
 
       return final_callback_carry, callback_outputs
 
+  def _forward_backward(self, cache: T, frames: torch.Tensor,
+                        num_frames: torch.Tensor) -> torch.Tensor:
+    """Shortest distance under the log semiring with gradients computed via autograd.
+
+    Args:
+      cache: Weight function cache data.
+      frames: [batch_dims..., max_num_frames, feature_size] padded frame
+        sequences.
+      num_frames: [batch_dims...] number of frames.
+
+    Returns:
+      (log_z, alpha_0_to_T_minus_1) tuple with gradients computed via autograd.
+    """
+    # Use standard _forward with autograd for gradient computation
+    # This ensures gradients flow to weight function parameters
+    return self._forward(
+        cache=cache,
+        frames=frames,
+        num_frames=num_frames,
+        semiring=semirings.Log
+    )
+
+
 def _init_context_state_weights(
     batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
-    semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+    semiring: semirings.Semiring[torch.Tensor],
+    device:str='cpu') -> torch.Tensor:
   is_start = torch.arange(num_states) == start
-  weights = torch.where(is_start, semiring.ones([], dtype),
-                      semiring.zeros([], dtype))
+  is_start = is_start.to(device) 
+
+  weights = torch.where(is_start, semiring.ones([], dtype, device),
+                      semiring.zeros([], dtype, device))
   return torch.broadcast_to(weights, (*batch_dims, num_states))
 
 
@@ -827,16 +720,16 @@ def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
   return torch.transpose(x, axes)
 
 
-def weight_step_scan(weight_step, batch_dims, context_states, context_next_labels):
+def weight_step_scan(weight_step, batch_dims, context_states, context_next_labels, device):
   assert context_states.shape == context_next_labels.shape
-  carry = torch.zeros(len(batch_dims))
-  blank_weight = torch.Tensor()
-  lexical_weight = torch.Tensor()
+  carry = torch.zeros(len(batch_dims)).to(device)
+  blank_weight = torch.Tensor().to(device)
+  lexical_weight = torch.Tensor().to(device)
 
   for last_dim_i in range(context_next_labels.shape[-1]):
     inputs = (
-      context_states[:, last_dim_i],
-      context_next_labels[:, last_dim_i]
+      context_states[:, last_dim_i].to(device),
+      context_next_labels[:, last_dim_i].to(device)
     )
     _, (blank_weight_i, lexical_weight_i) = weight_step(carry, inputs)
     blank_weight = torch.concat([blank_weight, blank_weight_i.unsqueeze(-1)], dim=-1)
@@ -844,36 +737,42 @@ def weight_step_scan(weight_step, batch_dims, context_states, context_next_label
 
   return blank_weight, lexical_weight
 
-def shortest_distance_step_scan(shortest_distance_step, init, xs):
+def shortest_distance_step_scan(shortest_distance_step, init, xs, device):
   t, alpha = init
   blank_weight, lexical_weight = xs
 
   for i in range(blank_weight.shape[0]):
-    (t, alpha), _ = shortest_distance_step((t, alpha), (blank_weight[i,:], lexical_weight[i,:]))
+    (t, alpha), _ = shortest_distance_step((t, 
+                                            alpha.to(device)), 
+
+                                           (blank_weight[i,:].to(device), 
+                                            lexical_weight[i,:].to(device))
+                                            )
 
   return (t, alpha), None
 
-def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, num_alignment_states=None):
+def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, num_alignment_states=None,
+                      device:str='cpu'):
   # WILL DO THE REFACTOR AND DOCUMENTATION AT END
   # I PROMISE !!!!
   t, alpha = init_carry
 
-  alpha_0_to_t_minus_1 = torch.tensor(())
+  alpha_0_to_t_minus_1 = torch.tensor((), device=device)
 
   # what is this code brother.
   frames, blank_mask, lexical_mask = inputs
   for i in range(frames.shape[in_dim]):
-    frame = torch.index_select(frames, in_dim, torch.tensor(i)).squeeze(in_dim)
+    frame = torch.index_select(frames, in_dim, torch.tensor(i).to(device)).squeeze(in_dim)
 
     if lexical_mask != None and blank_mask != None:
-      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
-      blank_mask_framed = torch.index_select(blank_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
+      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
+      blank_mask_framed = torch.index_select(blank_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
       (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
                                       (t, alpha),
                                       (frame, [blank_mask_framed], [lexical_mask_framed]))
     
     elif lexical_mask != None and blank_mask == None:
-      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i)).squeeze(in_dim)
+      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
       (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
                                       (t, alpha),
                                       (frame, blank_mask, lexical_mask_framed))
@@ -892,16 +791,49 @@ def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, n
   return (t, alpha), alpha_0_to_t_minus_1 
 
 def scan_step_backward(scan_fn, init_carry, inputs, in_dim, out_dim, reverse):
+  '''
+  Backward scan function that handles arbitrary callback output structures.
+  
+  Args:
+      scan_fn: Step function that takes (carry, (alpha, frame)) and returns (new_carry, outputs)
+      init_carry: Initial carry state
+      inputs: Tuple of (alphas, frames) tensors
+      in_dim: Dimension to iterate over
+      out_dim: Output dimension for stacking
+      reverse: Whether to iterate in reverse order
+  
+  Returns:
+      Tuple of (final_carry, stacked_outputs) where stacked_outputs preserves
+      the structure of callback outputs (can be tensors, tuples, etc.)
+  '''
   alphas, frames = inputs
-  blank_marginals = torch.Tensor()
-  lexical_marginals = torch.Tensor()
+  outputs_list = []
 
-  for i in range(frames.shape[in_dim]):
-    frame = torch.index_select(frames, in_dim, torch.tensor(i)).squeeze(in_dim)
-    alpha = torch.index_select(alphas, in_dim, torch.tensor(i)).squeeze(in_dim)
+  # Iterate in reverse if specified
+  indices = range(frames.shape[in_dim] - 1, -1, -1) if reverse else range(frames.shape[in_dim])
+
+  for i in indices:
+    frame = torch.index_select(frames, in_dim, torch.tensor(i).to(frames.device)).squeeze(in_dim)
+    alpha = torch.index_select(alphas, in_dim, torch.tensor(i).to(frames.device)).squeeze(in_dim)
 
     init_carry, callback_outputs = scan_fn(init_carry, (alpha, frame))
-    blank_marginals = torch.cat((blank_marginals, callback_outputs[0]), dim=out_dim)
-    lexical_marginals = torch.cat((lexical_marginals, callback_outputs[1]), dim=out_dim)
 
-  return init_carry, (blank_marginals, lexical_marginals)
+    # Collect callback outputs (can be tensors, tuples, or any pytree structure)
+    if callback_outputs is not None:
+      outputs_list.append(callback_outputs)
+
+  # Reorder outputs to match original time order if we iterated in reverse
+  if reverse and outputs_list:
+    outputs_list = outputs_list[::-1]
+
+  # Stack outputs using pytree to handle arbitrary structures
+  if outputs_list:
+    # Use optree.tree_map to stack each leaf tensor along the time dimension
+    stacked_outputs = optree.tree_map(
+        lambda *xs: torch.stack(xs, dim=in_dim),
+        *outputs_list
+    )
+  else:
+    stacked_outputs = None
+
+  return init_carry, stacked_outputs
