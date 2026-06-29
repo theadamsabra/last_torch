@@ -197,7 +197,7 @@ class JointWeightFn(WeightFn[torch.Tensor]):
     self.vocab_size = vocab_size
     self.hidden_size = hidden_size
     self.device = device
-    
+
     # Projections will be lazily initialized on first forward call
     self.context_projection = None
     self.blank_projection = None
@@ -213,14 +213,14 @@ class JointWeightFn(WeightFn[torch.Tensor]):
     context_embeddings = cache.to(self.device)
 
     if state is None:
-      frame = torch.unsqueeze(frame, 1).to(self.device) 
+      frame = torch.unsqueeze(frame, 1).to(self.device)
     else:
       context_embeddings = torch.index_select(context_embeddings, dim=0,
                                               index=state.long())
 
     # Lazily initialize projections on first call
     if self.context_projection is None:
-      self.context_projection = nn.Linear(context_embeddings.shape[-1], 
+      self.context_projection = nn.Linear(context_embeddings.shape[-1],
                                           self.hidden_size, bias=False, device=self.device)
     if self.blank_projection is None:
       self.blank_projection = nn.Linear(frame.shape[-1], self.hidden_size,

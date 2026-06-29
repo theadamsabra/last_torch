@@ -15,14 +15,10 @@
 """Recognition lattice."""
 
 from collections.abc import Callable, Sequence
-import functools
 from typing import Any, Generic, Optional, Protocol, TypeVar
 
 import torch
-from torch import utils
-from torch._higher_order_ops import scan
 import torch.nn as nn
-import torch.utils._pytree as pytree 
 import optree
 
 from last_torch import alignments
@@ -117,6 +113,8 @@ class RecognitionLattice(nn.Module, Generic[T]):
     self.weight_fn_cacher = self.weight_fn_cacher_factory(self.context)
     self.weight_fn = self.weight_fn_factory(self.context)
     self.device = device
+    self._align_fwd = torch.compile(self.alignment.forward)
+    self._align_str_fwd = torch.compile(self.alignment.string_forward)
 
   def build_cache(self) -> T:
     """Builds the weight function cache.
@@ -282,103 +280,64 @@ class RecognitionLattice(nn.Module, Generic[T]):
       raise ValueError('num_labels and num_frames have different batch_dims: '
                         f'{num_labels.shape} vs {batch_dims}')
 
-    # Calculate arc weights for all visited context states.
-    #
-    # We can't fit into memory all
-    # O(batch_size * max_num_frames * (max_num_labels + 1) * (vocab_size + 1))
-    # arcs, thus we use a scan loop over the (max_num_labels + 1) axis to
-    # produce just the O(batch_size * max_num_frames * (max_num_labels + 1))
-    # arcs actually needed later. This is better than scanning over the
-    # max_num_frames axis because weight_fn can be vectorized over multiple
-    # frames for the same state (weight_fn with states often involves
-    # gathering).
-
-    # Before vmaps
-    # - frame is [batch_dims..., hidden_size]
-    # - state is [batch_dims...]
-    # Results are ([batch_dims...], [batch_dims..., vocab_size]).
-
-    # Add time dimension on frame
-    # - frame is [batch_dims..., max_num_frames, hidden_size]
-    # - state is [batch_dims...]
-    # Results are ([batch_dims..., max_num_frames],
-    # [batch_dims..., max_num_frames, vocab_size]).
-    compute_weights = (
-      lambda frame: self.weight_fn(cache, frame, self._state))
-    # Add time dimension on frame
-    # - frame is [batch_dims..., max_num_frames, hidden_size]
-    # - state is [batch_dims...]
-    # Results are ([batch_dims..., max_num_frames],
-    # [batch_dims..., max_num_frames, vocab_size]).
-
-    compute_weights = torch.vmap(
-        compute_weights,
-        randomness='same',
-        in_dims=1,
-        out_dims=-1
-    )
-    def make_safe_classes(y):
-       return torch.where(y-1 < 0, 1, y)
-
-    def gather_weight(weights, y):
-      # weights: [batch_dims..., max_num_frames, vocab_size]
-      # y: [batch_dims..., max_num_frames]
-      # weights are for labels [1, vocab_size], so y-1 are the corresponding
-      # indicies. one_hot(-1) is safe (all zeros).
-      y = make_safe_classes(y)
-      mask = torch.nn.functional.one_hot(y.long() - 1, weights.shape[-1]).to(self.device)
-      return torch.einsum('...TV,...V->...T', weights, mask.float())
-
-    def weight_step(carry, inputs):
-      self._state, next_label = inputs
-      blank_weight, lexical_weights = compute_weights(frames)
-      lexical_weight = gather_weight(lexical_weights.permute(0,2,1), 
-                                     next_label)
-      #      carry = None doesn't hold for pytorch's scan. We replace with
-      #      torch.zeros(1)
-      return carry, (blank_weight, lexical_weight)
-
-    # [batch_dims..., max_num_labels + 1]
+    # Precompute arc weights for all (label-state, frame) pairs via double vmap.
     context_states = self.context.walk_states(labels)
     context_next_labels = torch.concatenate(
         [labels, torch.ones_like(labels[..., :1])], dim=-1)
-    # [batch_dims..., max_num_frames, max_num_labels+1]
-    blank_weight, lexical_weight = weight_step_scan(
-      weight_step, batch_dims, context_states, context_next_labels, self.device
-    )
 
-    # Dynamic program for summing up all alignment paths. Actual work is done by
-    # alignment.string_forward(). This function mostly takes care of padding
-    # frames.
-    def shortest_distance_step(carry, inputs):
-      # alpha: [batch_dims..., max_num_labels + 1]
-      t, alpha = carry
-      # blank, lexical: [batch_dims..., max_num_labels + 1]
-      blank, lexical = inputs
-      # We current only support alignment-state invariant weights.
-      blank = [blank for _ in range(self.alignment.num_states())]
-      lexical = [lexical for _ in range(self.alignment.num_states())]
-      next_alpha = self.alignment.string_forward(
-          alpha=alpha, blank=blank, lexical=lexical, semiring=semiring)
-      is_padding = (t >= num_frames).unsqueeze(-1)
-      next_alpha = torch.where(is_padding, alpha, next_alpha)
-      return (t + 1, next_alpha), None
+    # Warm up lazy weight init before vmap (same reason as in _forward).
+    _ = self.weight_fn(cache, frames.select(-2, 0), context_states.select(-1, 0))
 
+    # ponytail: double vmap (outer=label states L+1, inner=frames T).
+    def _weight_for_state(state):
+      return torch.func.vmap(
+          lambda frame: self.weight_fn(cache, frame, state),
+          in_dims=1, out_dims=-1)(frames)
+
+    all_blank, all_lex_VT = torch.func.vmap(
+        _weight_for_state, in_dims=-1, out_dims=-1)(context_states)
+    # all_blank:   [batch..., T, L+1]
+    # all_lex_VT:  [batch..., vocab, T, L+1]
+
+    # Gather lexical weight for each label position using context_next_labels.
+    T = frames.shape[-2]
+    all_lex = all_lex_VT.permute(
+        *range(len(batch_dims)), len(batch_dims)+1, len(batch_dims)+2, len(batch_dims))
+    # all_lex: [batch..., T, L+1, vocab]
+    l_idx = context_next_labels.unsqueeze(-2).expand(
+        *batch_dims, T, context_next_labels.shape[-1])  # [batch..., T, L+1]
+    safe_idx = (l_idx.long() - 1).clamp(min=0)
+    blank_weight = all_blank  # [batch..., T, L+1]
+    lexical_weight = torch.gather(
+        all_lex, -1, safe_idx.unsqueeze(-1)).squeeze(-1)  # [batch..., T, L+1]
+
+    # Sequential forward scan over frames using precomputed weights.
     num_alpha_states = labels.shape[-1] + 1
     init_alpha = _init_context_state_weights(
         batch_dims=batch_dims,
-        dtype=lexical_weight.dtype,
+        dtype=blank_weight.dtype,
         num_states=num_alpha_states,
         start=0,
-        semiring=semiring)
-    (_, alpha), _ = shortest_distance_step_scan(
-        shortest_distance_step,
-        (0, init_alpha),
-        pytree.tree_map(
-            functools.partial(_to_time_major, num_batch_dims=len(batch_dims)),
-            (blank_weight, lexical_weight)),
-        self.device
-        )
+        semiring=semiring,
+        device=self.device)
+    num_states = self.alignment.num_states()
+
+    # Precompute per-step padding masks — avoids T separate comparison kernels.
+    in_dim_str = len(batch_dims)  # time is the next-to-last dim
+    step_idx_str = torch.arange(T, device=self.device).view(
+        (T,) + (1,) * len(batch_dims))
+    padding_list_str = list((step_idx_str >= num_frames).unsqueeze(-1).unbind(0))
+
+    alpha = init_alpha
+    for i in range(T):
+      b = blank_weight.select(in_dim_str, i)
+      l = lexical_weight.select(in_dim_str, i)
+      next_alpha = self._align_str_fwd(
+          alpha=alpha,
+          blank=[b for _ in range(num_states)],
+          lexical=[l for _ in range(num_states)],
+          semiring=semiring)
+      alpha = torch.where(padding_list_str[i], alpha, next_alpha)
     is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states).to(self.device)
     return semiring.sum(
         torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
@@ -439,69 +398,66 @@ class RecognitionLattice(nn.Module, Generic[T]):
           f'{self.alignment.num_states()} (the number of alignment states), '
           f'but is {len(lexical_mask)}')
 
-    # Dynamic program for summing up all alignment paths.
-    def step(weight_fn, carry, inputs):
-      # alpha: [batch_dims..., num_context_states]
-      t, alpha = carry
-      # frame: [batch_dims..., hidden_size]
-      # blank_mask: None or [batch_dims...]
-      # lexical_mask: None or broadcastable to
-      #   [batch_dims..., num_alignment_states, vocab_size]
-      frame, blank_mask, lexical_mask = inputs
-      # blank: [batch_dims..., num_context_states]
-      # lexical: [batch_dims..., num_context_states, vocab_size]
-      blank, lexical = weight_fn(cache, frame)
-      # We currently only support alignment-state-invariant weights.
-      blank = [blank for _ in range(self.alignment.num_states())]
-      lexical = [lexical for _ in range(self.alignment.num_states())]
-      if blank_mask is not None:
-        blank = [b + m for b, m in zip(blank, blank_mask)]
-      if lexical_mask is not None:
-        lexical = [l + m for l, m in zip(lexical, lexical_mask)]
-      next_alpha = self.alignment.forward(
+    in_dim = len(batch_dims)
+    out_dim = len(batch_dims)
+    T = frames.shape[in_dim]
+
+    # Warm up lazy weight init (JointWeightFn allocates nn.Linear on first call);
+    # vmap cannot run random ops so init must happen before we enter vmap.
+    _blank_probe = self.weight_fn(cache, frames.select(in_dim, 0))[0]
+
+    # Precompute all T weight pairs in one batched call instead of T sequential ones.
+    # ponytail: vmap over time dim; cache is captured, not vmapped.
+    frames_T = frames.movedim(in_dim, 0)  # [T, batch..., features]
+    all_blank_T, all_lexical_T = torch.func.vmap(
+        lambda f: self.weight_fn(cache, f), in_dims=0, out_dims=0)(frames_T)
+    all_blank = all_blank_T.movedim(0, in_dim)    # [batch..., T, num_ctx]
+    all_lexical = all_lexical_T.movedim(0, in_dim)  # [batch..., T, num_ctx, vocab]
+
+    alpha = _init_context_state_weights(
+        batch_dims=batch_dims,
+        dtype=_blank_probe.dtype,
+        num_states=self.context.shape()[0],
+        start=self.context.start(),
+        semiring=semiring,
+        device=self.device)
+
+    has_both = blank_mask is not None and lexical_mask is not None
+    has_lex_only = blank_mask is None and lexical_mask is not None
+    num_states = self.alignment.num_states()
+
+    # Precompute padding masks for all T steps — avoids T separate comparison kernels.
+    # Shape: [T, batch...], then unbind into a Python list of views.
+    step_idx = torch.arange(T, device=self.device).view(
+        (T,) + (1,) * len(batch_dims))
+    padding_list = list((step_idx >= num_frames).unsqueeze(-1).unbind(0))
+
+    alpha_list = []
+    for i in range(T):
+      blank_t = all_blank.select(in_dim, i)
+      lexical_t = all_lexical.select(in_dim, i)
+      blank = [blank_t for _ in range(num_states)]
+      lexical = [lexical_t for _ in range(num_states)]
+      if has_both:
+        bm = blank_mask[0].select(in_dim, i)
+        lm = lexical_mask[0].select(in_dim, i)
+        blank = [b + m for b, m in zip(blank, [bm])]
+        lexical = [l + m for l, m in zip(lexical, [lm])]
+      elif has_lex_only:
+        lm = lexical_mask[0].select(in_dim, i)
+        # ponytail: lm as raw tensor — zip iterates batch dim, stops at len(lexical)=1.
+        lexical = [l + m for l, m in zip(lexical, lm)]
+      next_alpha = self._align_fwd(
           alpha=alpha,
           blank=blank,
           lexical=lexical,
           context=self.context,
           semiring=semiring)
-      is_padding = (t >= num_frames).unsqueeze(-1)
-      next_alpha = torch.where(is_padding, alpha, next_alpha)
-      return (t + 1, next_alpha), alpha
+      alpha_list.append(alpha)
+      alpha = torch.where(padding_list[i], alpha, next_alpha)
 
-    # Reduce memory footprint when using autodiff.
-    #
-    # For the log semiring, this is not as fast or memory efficient as forward-
-    # backward, but still better than the defaults (i.e. no remat or no saving
-    # intermediates at all).
-    #
-    # For the tropical semiring, this should be equivalent to no remat.
-    def save_small(prim, *args, **params):
-      y, _ = prim.abstract_eval(*args, **params)
-      greater_than_1_dims = len([None for i in y.shape if i > 1])
-      save = greater_than_1_dims <= (len(batch_dims) + 1)
-      return save
-
-
-    init_t = torch.Tensor([0]).to(self.device)
-    init_alpha = _init_context_state_weights(
-        batch_dims=batch_dims,
-        # TODO(wuke): Find a way to do this with jax.eval_shape.
-        dtype=self.weight_fn(cache, frames[..., 0, :])[0].dtype,
-        num_states=self.context.shape()[0],
-        start=self.context.start(),
-        semiring=semiring,
-        device=self.device)
-    init_carry = (init_t, init_alpha)
-
-    inputs = (frames, blank_mask, lexical_mask)
-    in_dim = len(batch_dims)
-    out_dim = len(batch_dims)
-
-    (_, alpha_T), alpha_0_to_T_minus_1 = scan_step_forward( 
-        step,
-        self.weight_fn, 
-        init_carry, inputs, in_dim, out_dim, self.alignment.num_states(),
-        device=self.device)
+    alpha_T = alpha
+    alpha_0_to_T_minus_1 = torch.stack(alpha_list, dim=out_dim)
     return semiring.sum(alpha_T, dim=-1), alpha_0_to_T_minus_1
 
 
@@ -700,135 +656,25 @@ def _init_context_state_weights(
   return torch.broadcast_to(weights, (*batch_dims, num_states))
 
 
-def _to_time_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
-  # [batch_dims..., time, ...] -> [time, batch_dims..., ...]
-  axes = [
-      num_batch_dims,
-      *range(num_batch_dims),
-      *range(num_batch_dims + 1, x.ndim),
-  ]
-  return torch.permute(x, tuple(axes))
 
-
-def _to_batch_major(x: torch.Tensor, num_batch_dims: int) -> torch.Tensor:
-  # [time, batch_dims..., ...] -> [batch_dims..., time, ...]
-  axes = [
-      *range(1, num_batch_dims + 1),
-      0,
-      *range(num_batch_dims + 1, x.ndim),
-  ]
-  return torch.transpose(x, axes)
-
-
-def weight_step_scan(weight_step, batch_dims, context_states, context_next_labels, device):
-  assert context_states.shape == context_next_labels.shape
-  carry = torch.zeros(len(batch_dims)).to(device)
-  blank_weight = torch.Tensor().to(device)
-  lexical_weight = torch.Tensor().to(device)
-
-  for last_dim_i in range(context_next_labels.shape[-1]):
-    inputs = (
-      context_states[:, last_dim_i].to(device),
-      context_next_labels[:, last_dim_i].to(device)
-    )
-    _, (blank_weight_i, lexical_weight_i) = weight_step(carry, inputs)
-    blank_weight = torch.concat([blank_weight, blank_weight_i.unsqueeze(-1)], dim=-1)
-    lexical_weight = torch.concat([lexical_weight, lexical_weight_i.unsqueeze(-1)],dim=-1)
-
-  return blank_weight, lexical_weight
-
-def shortest_distance_step_scan(shortest_distance_step, init, xs, device):
-  t, alpha = init
-  blank_weight, lexical_weight = xs
-
-  for i in range(blank_weight.shape[0]):
-    (t, alpha), _ = shortest_distance_step((t, 
-                                            alpha.to(device)), 
-
-                                           (blank_weight[i,:].to(device), 
-                                            lexical_weight[i,:].to(device))
-                                            )
-
-  return (t, alpha), None
-
-def scan_step_forward(scan_fn, weight_fn, init_carry, inputs, in_dim, out_dim, num_alignment_states=None,
-                      device:str='cpu'):
-  # WILL DO THE REFACTOR AND DOCUMENTATION AT END
-  # I PROMISE !!!!
-  t, alpha = init_carry
-
-  alpha_0_to_t_minus_1 = torch.tensor((), device=device)
-
-  # what is this code brother.
-  frames, blank_mask, lexical_mask = inputs
-  for i in range(frames.shape[in_dim]):
-    frame = torch.index_select(frames, in_dim, torch.tensor(i).to(device)).squeeze(in_dim)
-
-    if lexical_mask != None and blank_mask != None:
-      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
-      blank_mask_framed = torch.index_select(blank_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
-      (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
-                                      (t, alpha),
-                                      (frame, [blank_mask_framed], [lexical_mask_framed]))
-    
-    elif lexical_mask != None and blank_mask == None:
-      lexical_mask_framed = torch.index_select(lexical_mask[0], in_dim, torch.tensor(i, device=device)).squeeze(in_dim)
-      (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
-                                      (t, alpha),
-                                      (frame, blank_mask, lexical_mask_framed))
-
-    else:
-      (t, alpha), alpha_t_minus_1 = scan_fn(weight_fn, 
-                                      (t, alpha),
-                                      (frame, blank_mask, lexical_mask))
-
-    alpha_0_to_t_minus_1 = torch.cat((alpha_0_to_t_minus_1, alpha_t_minus_1), dim=out_dim)  
-
-  alpha_0_to_t_minus_1 = alpha_0_to_t_minus_1.reshape(
-    frames.shape[:-1] + (alpha.shape[-1],)  
-  )
-
-  return (t, alpha), alpha_0_to_t_minus_1 
 
 def scan_step_backward(scan_fn, init_carry, inputs, in_dim, out_dim, reverse):
-  '''
-  Backward scan function that handles arbitrary callback output structures.
-  
-  Args:
-      scan_fn: Step function that takes (carry, (alpha, frame)) and returns (new_carry, outputs)
-      init_carry: Initial carry state
-      inputs: Tuple of (alphas, frames) tensors
-      in_dim: Dimension to iterate over
-      out_dim: Output dimension for stacking
-      reverse: Whether to iterate in reverse order
-  
-  Returns:
-      Tuple of (final_carry, stacked_outputs) where stacked_outputs preserves
-      the structure of callback outputs (can be tensors, tuples, etc.)
-  '''
   alphas, frames = inputs
+  T = frames.shape[in_dim]
+  indices = range(T - 1, -1, -1) if reverse else range(T)
   outputs_list = []
 
-  # Iterate in reverse if specified
-  indices = range(frames.shape[in_dim] - 1, -1, -1) if reverse else range(frames.shape[in_dim])
-
   for i in indices:
-    frame = torch.index_select(frames, in_dim, torch.tensor(i).to(frames.device)).squeeze(in_dim)
-    alpha = torch.index_select(alphas, in_dim, torch.tensor(i).to(frames.device)).squeeze(in_dim)
-
+    frame = frames.select(in_dim, i)   # view, no allocation
+    alpha = alphas.select(in_dim, i)
     init_carry, callback_outputs = scan_fn(init_carry, (alpha, frame))
-
-    # Collect callback outputs (can be tensors, tuples, or any pytree structure)
     if callback_outputs is not None:
       outputs_list.append(callback_outputs)
 
-  # Reorder outputs to match original time order if we iterated in reverse
   if reverse and outputs_list:
     outputs_list = outputs_list[::-1]
 
-  # Stack outputs using pytree to handle arbitrary structures
   if outputs_list:
-    # Use optree.tree_map to stack each leaf tensor along the time dimension
     stacked_outputs = optree.tree_map(
         lambda *xs: torch.stack(xs, dim=in_dim),
         *outputs_list
