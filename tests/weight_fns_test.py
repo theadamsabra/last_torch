@@ -191,3 +191,44 @@ class SharedRNNCacher(absltest.TestCase):
             cacher(),
             [[pad, pad, pad, start]],
         )
+   def test_rnn_cell_is_persistent_and_trainable(self):
+      """The default LSTMCell must be built in __init__, not per forward().
+
+      Flax builds it under @nn.compact, which registers it in the param dict
+      once. Constructing it inside forward() instead reinitializes it randomly
+      on every call and leaves its weights out of named_parameters(), so they
+      receive no gradients and never train.
+      """
+      cacher = weight_fns.SharedRNNCacher(
+          vocab_size=3, context_size=2, rnn_size=4, rnn_embedding_size=6)
+
+      registered = dict(cacher.named_parameters())
+      self.assertTrue(
+          any(name.startswith('rnn_cell.') for name in registered),
+          f'rnn_cell params not registered: {sorted(registered)}')
+
+      npt.assert_array_equal(cacher().detach(), cacher().detach())
+
+      torch.sum(cacher()).backward()
+      for name, param in cacher.named_parameters():
+        self.assertIsNotNone(param.grad, f'no gradient reached {name}')
+
+   def test_table_is_built_from_hidden_state(self):
+      """Flax's LSTMCell returns (carry=(c, h), y=h) and the table is built from y.
+
+      torch's nn.LSTMCell returns (h, c) directly, so the port must append the
+      hidden state. The FakeRNNCell in test_call returns (carry, carry), which
+      cannot distinguish the two.
+      """
+      hidden, cell = 1.0, 2.0
+
+      class SplitStateCell(torch.nn.LSTMCell):
+        def forward(self, inputs, carry=None):
+          n = inputs.shape[0]
+          return (torch.full((n, self.hidden_size), hidden),
+                  torch.full((n, self.hidden_size), cell))
+
+      cacher = weight_fns.SharedRNNCacher(
+          vocab_size=3, context_size=1, rnn_size=4, rnn_embedding_size=6,
+          rnn_cell=SplitStateCell(6, 4))
+      npt.assert_array_equal(cacher().detach(), hidden)

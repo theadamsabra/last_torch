@@ -1,0 +1,11 @@
+framework,num_frames,peak_mb
+jax,10,4.400
+torch,10,0.049
+jax,25,2.294
+torch,25,0.090
+jax,50,2.199
+torch,50,0.162
+jax,100,2.106
+torch,100,0.293
+jax,200,1.491
+torch,200,0.554

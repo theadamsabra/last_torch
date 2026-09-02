@@ -1,0 +1,41 @@
+scope,device,num_frames,variant,wall_ms
+isolated,cpu,10,autograd,1.781
+isolated,cpu,10,custom VJP,1.214
+isolated,cpu,50,autograd,5.337
+isolated,cpu,50,custom VJP,2.707
+isolated,cpu,100,autograd,9.949
+isolated,cpu,100,custom VJP,4.609
+isolated,cpu,200,autograd,19.757
+isolated,cpu,200,custom VJP,8.54
+isolated,cpu,500,autograd,49.988
+isolated,cpu,500,custom VJP,20.831
+isolated,cuda,10,autograd,3.867
+isolated,cuda,10,custom VJP,2.168
+isolated,cuda,50,autograd,10.353
+isolated,cuda,50,custom VJP,5.183
+isolated,cuda,100,autograd,18.95
+isolated,cuda,100,custom VJP,8.812
+isolated,cuda,200,autograd,36.25
+isolated,cuda,200,custom VJP,15.943
+isolated,cuda,500,autograd,88.741
+isolated,cuda,500,custom VJP,37.581
+end-to-end,cpu,10,before VJP,3.647
+end-to-end,cpu,10,after VJP,3.16
+end-to-end,cpu,50,before VJP,14.561
+end-to-end,cpu,50,after VJP,11.697
+end-to-end,cpu,100,before VJP,36.151
+end-to-end,cpu,100,after VJP,29.131
+end-to-end,cpu,200,before VJP,96.727
+end-to-end,cpu,200,after VJP,89.608
+end-to-end,cpu,500,before VJP,780.134
+end-to-end,cpu,500,after VJP,740.334
+end-to-end,cuda,10,before VJP,6.562
+end-to-end,cuda,10,after VJP,5.618
+end-to-end,cuda,50,before VJP,22.306
+end-to-end,cuda,50,after VJP,17.292
+end-to-end,cuda,100,before VJP,41.949
+end-to-end,cuda,100,after VJP,31.642
+end-to-end,cuda,200,before VJP,83.351
+end-to-end,cuda,200,after VJP,63.463
+end-to-end,cuda,500,before VJP,268.431
+end-to-end,cuda,500,after VJP,216.468

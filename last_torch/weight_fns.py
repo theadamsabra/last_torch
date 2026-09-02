@@ -273,7 +273,12 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
     self.context_size = context_size
     self.rnn_size = rnn_size
     self.rnn_embedding_size = rnn_embedding_size
-    self.rnn_cell = rnn_cell
+    # Built here, not in forward(). Flax creates this under @nn.compact, which
+    # registers it in the param dict once; constructing it per-forward instead
+    # would reinitialize it randomly on every build_cache() call and leave its
+    # weights unregistered, so they would never receive gradients or train.
+    self.rnn_cell = rnn_cell if rnn_cell is not None else nn.LSTMCell(
+        rnn_embedding_size, rnn_size, device=device)
 
     self.device = device
     self.embedding = nn.Embedding(self.vocab_size + 1, self.rnn_embedding_size, device=self.device)
@@ -282,11 +287,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
     return einops.repeat(state, 'n ... -> (n v) ...', v = self.vocab_size)
 
   def forward(self) -> torch.Tensor:
-    if self.rnn_cell is None:
-      rnn_cell = nn.LSTMCell(self.rnn_embedding_size, self.rnn_size, device=self.device)
-    else:
-      rnn_cell = self.rnn_cell
-
+    rnn_cell = self.rnn_cell
     feed_cell_state = rnn_cell._get_name() == 'LSTMCell'
 
     hidden_state, cell_state = rnn_cell(
@@ -294,7 +295,10 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
           torch.Tensor([0]).long().to(self.device)
         )
       )
-    parts = [cell_state]
+    # The table is built from the cell's *output*. Flax's LSTMCell returns
+    # (carry, y) with carry == (c, h) and y == h, so the reference appends the
+    # hidden state; torch's nn.LSTMCell returns (h, c) directly.
+    parts = [hidden_state]
     inputs = None
     for i in range(self.context_size):
       if i == 0:
@@ -310,9 +314,9 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
         )
       else:
         hidden_state, cell_state = rnn_cell(
-          inputs, tiled_hidden 
+          inputs, tiled_hidden
         )
-      parts.append(cell_state)
+      parts.append(hidden_state)
     
     return torch.concatenate(parts, dim=0).to(self.device)
 
