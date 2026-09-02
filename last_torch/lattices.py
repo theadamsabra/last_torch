@@ -138,6 +138,122 @@ class _RecurrenceFn(torch.autograd.Function):
             torch.stack(grad_lexical_steps, dim=in_dim), None, None)
 
 
+class _StringRecurrenceFn(torch.autograd.Function):
+  """Custom VJP for the label-aligned recurrence in _string_forward().
+
+  The same split as _RecurrenceFn: this wraps only the scan over frames, taking
+  already-gathered per-(frame, label-state) arc weights as inputs, so the double
+  vmap that produced them stays outside under ordinary autograd and the returned
+  grads reach the weight_fn parameters on their own.
+
+  Only valid under the Log semiring, and only for alignments that implement
+  string_backward(); _string_forward falls back to plain autograd otherwise.
+  """
+
+  @staticmethod
+  def forward(blank_weight, lexical_weight, num_frames, num_labels, lattice):
+    # blank_weight, lexical_weight: [batch_dims..., T, num_label_states]
+    batch_dims = num_frames.shape
+    in_dim = len(batch_dims)
+    T = blank_weight.shape[in_dim]
+    num_alpha_states = blank_weight.shape[-1]
+    num_states = lattice.alignment.num_states()
+
+    with torch.no_grad():
+      alpha = _init_context_state_weights(
+          batch_dims=batch_dims,
+          dtype=blank_weight.dtype,
+          num_states=num_alpha_states,
+          start=0,
+          semiring=semirings.Log,
+          device=lattice.device)
+      padding_list = _padding_masks(num_frames, T, blank_weight.device)
+
+      alpha_list = []
+      for i in range(T):
+        b = blank_weight.select(in_dim, i)
+        l = lexical_weight.select(in_dim, i)
+        next_alpha = lattice._align_str_fwd(
+            alpha=alpha,
+            blank=[b for _ in range(num_states)],
+            lexical=[l for _ in range(num_states)],
+            semiring=semirings.Log)
+        alpha_list.append(alpha)
+        alpha = torch.where(padding_list[i], alpha, next_alpha)
+
+      alpha_0_to_T_minus_1 = torch.stack(alpha_list, dim=in_dim)
+      is_final = _string_final_mask(num_labels, num_alpha_states,
+                                    blank_weight.device)
+      log_z = semirings.Log.sum(
+          torch.where(is_final, alpha, semirings.Log.zeros([], alpha.dtype)),
+          dim=-1)
+    return log_z, alpha_0_to_T_minus_1
+
+  @staticmethod
+  def setup_context(ctx, inputs, output):
+    blank_weight, lexical_weight, num_frames, num_labels, lattice = inputs
+    log_z, alpha_0_to_T_minus_1 = output
+    ctx.save_for_backward(blank_weight, lexical_weight, num_frames, num_labels,
+                          log_z, alpha_0_to_T_minus_1)
+    ctx.lattice = lattice
+
+  @staticmethod
+  def backward(ctx, grad_log_z, _grad_alphas):
+    (blank_weight, lexical_weight, num_frames, num_labels, log_z,
+     alphas) = ctx.saved_tensors
+    lattice = ctx.lattice
+    batch_dims = num_frames.shape
+    in_dim = len(batch_dims)
+    T = blank_weight.shape[in_dim]
+    num_alpha_states = blank_weight.shape[-1]
+    num_states = lattice.alignment.num_states()
+
+    # Unlike _forward, only the state matching num_labels is final, so beta is
+    # seeded there rather than at every state.
+    is_final = _string_final_mask(num_labels, num_alpha_states,
+                                  blank_weight.device)
+    beta = torch.where(is_final,
+                       semirings.Log.ones([], log_z.dtype).to(log_z.device),
+                       semirings.Log.zeros([], log_z.dtype).to(log_z.device))
+    beta = torch.broadcast_to(beta, (*batch_dims, num_alpha_states))
+    padding_list = _padding_masks(num_frames, T, blank_weight.device)
+    scale = grad_log_z.unsqueeze(-1)
+
+    grad_blank_steps = [None] * T
+    grad_lexical_steps = [None] * T
+    for t in range(T - 1, -1, -1):
+      b = blank_weight.select(in_dim, t)
+      l = lexical_weight.select(in_dim, t)
+      next_beta, blank_marginal, lexical_marginal = lattice._align_str_bwd(
+          alpha=alphas.select(in_dim, t),
+          blank=[b for _ in range(num_states)],
+          lexical=[l for _ in range(num_states)],
+          beta=beta,
+          log_z=log_z)
+      if num_states == 1:
+        blank_marginal = blank_marginal[0]
+        lexical_marginal = lexical_marginal[0]
+      else:
+        blank_marginal = torch.sum(torch.stack(blank_marginal), dim=0)
+        lexical_marginal = torch.sum(torch.stack(lexical_marginal), dim=0)
+
+      is_padding = padding_list[t]
+      beta = torch.where(is_padding, beta, next_beta)
+      grad_blank_steps[t] = torch.where(is_padding, 0, blank_marginal) * scale
+      grad_lexical_steps[t] = torch.where(is_padding, 0,
+                                          lexical_marginal) * scale
+
+    return (torch.stack(grad_blank_steps, dim=in_dim),
+            torch.stack(grad_lexical_steps, dim=in_dim), None, None, None)
+
+
+def _string_final_mask(num_labels: torch.Tensor, num_alpha_states: int,
+                       device) -> torch.Tensor:
+  """[batch_dims..., num_label_states] mask of the single accepting state."""
+  return num_labels.unsqueeze(-1) == torch.arange(num_alpha_states,
+                                                  device=device)
+
+
 def _padding_masks(num_frames: torch.Tensor, T: int,
                    device: str) -> list[torch.Tensor]:
   """Per-step [batch_dims..., 1] padding masks, as one comparison for all T."""
@@ -234,6 +350,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
     # Must be compiled: uncompiled, per-step Python dispatch in _RecurrenceFn's
     # explicit backward loop cancels the arc-marginals saving entirely.
     self._align_bwd = torch.compile(self.alignment.backward)
+    # Optional: only FrameDependent implements the label-aligned backward, so
+    # _string_forward falls back to autograd when this is absent.
+    _str_bwd = getattr(self.alignment, 'string_backward', None)
+    self._align_str_bwd = torch.compile(_str_bwd) if _str_bwd else None
 
   def _precompute_weights(self, cache: T, frames: torch.Tensor,
                           in_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -460,6 +580,14 @@ class RecognitionLattice(nn.Module, Generic[T]):
         (T,) + (1,) * len(batch_dims))
     padding_list_str = list((step_idx_str >= num_frames).unsqueeze(-1).unbind(0))
 
+    # The arc-marginals backward is only defined for the log semiring, and only
+    # FrameDependent implements string_backward(); everything else keeps the
+    # plain autograd scan below.
+    if semiring is semirings.Log and self._align_str_bwd is not None:
+      log_z, _ = _StringRecurrenceFn.apply(blank_weight, lexical_weight,
+                                           num_frames, num_labels, self)
+      return log_z
+
     alpha = init_alpha
     for i in range(T):
       b = blank_weight.select(in_dim_str, i)
@@ -470,7 +598,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
           lexical=[l for _ in range(num_states)],
           semiring=semiring)
       alpha = torch.where(padding_list_str[i], alpha, next_alpha)
-    is_final = num_labels.unsqueeze(-1) == torch.arange(num_alpha_states).to(self.device)
+    is_final = _string_final_mask(num_labels, num_alpha_states, self.device)
     return semiring.sum(
         torch.where(is_final, alpha, semiring.zeros([], alpha.dtype)), dim=-1)
 
@@ -772,7 +900,12 @@ def _init_context_state_weights(
 
   weights = torch.where(is_start, semiring.ones([], dtype, device),
                       semiring.zeros([], dtype, device))
-  return torch.broadcast_to(weights, (*batch_dims, num_states))
+  # .contiguous() matters: a bare broadcast_to view has stride 0 on the batch
+  # dims, so step 0 of a scan hands the compiled alignment kernel a differently
+  # strided alpha than steps 1..T-1 do. Dynamo guards on stride, so that alone
+  # forces a recompile, and across sequence lengths it exhausts the recompile
+  # limit and silently falls back to eager.
+  return torch.broadcast_to(weights, (*batch_dims, num_states)).contiguous()
 
 
 

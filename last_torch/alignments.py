@@ -248,6 +248,26 @@ def shift_down(x:torch.Tensor,
       [semiring.zeros((*x.shape[:-1], 1), x.dtype, x.device), x[..., :-1]], axis=-1)
 
 
+def shift_up(x: torch.Tensor,
+             semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+  """Shifts values up by 1 position.
+
+  The transpose of shift_down(), used to propagate backward weights across
+  lexical arcs in string_backward().
+
+  Args:
+    x: [batch_dims..., N] input values.
+    semiring: Semiring to use for filling in zero values.
+
+  Returns:
+    [batch_dims..., N] output values, where output[..., i] = x[..., i + 1] and
+    output[..., N - 1] = semiring zero.
+  """
+  return torch.concatenate(
+      [x[..., 1:], semiring.zeros((*x.shape[:-1], 1), x.dtype, x.device)],
+      axis=-1)
+
+
 def check_num_weights(alignment: TimeSyncAlignmentLattice,
                       blank: Sequence[torch.Tensor],
                       lexical: Sequence[torch.Tensor]):
@@ -327,6 +347,37 @@ class FrameDependent(TimeSyncAlignmentLattice):
     return semiring.plus(
         semiring.times(alpha, blank[0]),
         shift_down(semiring.times(alpha, lexical[0]), semiring))
+
+  def string_backward(
+      self, alpha: torch.Tensor, blank: Sequence[torch.Tensor],
+      lexical: Sequence[torch.Tensor], beta: torch.Tensor, log_z: torch.Tensor
+  ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+    """Backward counterpart of string_forward() under the log semiring.
+
+    string_forward() takes a blank arc from label state j to itself with weight
+    blank[j], and a lexical arc from j to j + 1 with weight lexical[j] (that is
+    what the shift_down() there means). The backward weights therefore collect
+    beta at the same state across a blank arc and at the next state across a
+    lexical arc, which is shift_up().
+
+    Args:
+      alpha: [batch_dims..., num_label_states] forward weights into this frame.
+      blank: length-1 sequence of [batch_dims..., num_label_states] weights.
+      lexical: length-1 sequence of [batch_dims..., num_label_states] weights.
+      beta: [batch_dims..., num_label_states] backward weights out of this frame.
+      log_z: [batch_dims...] shortest distance from string_forward().
+
+    Returns:
+      (next_beta, [blank_marginal], [lexical_marginal]) tuple.
+    """
+    check_num_weights(self, blank, lexical)
+    blank_beta = blank[0] + beta
+    lexical_beta = lexical[0] + shift_up(beta, semirings.Log)
+    log_scale = alpha - log_z.unsqueeze(-1)
+    blank_marginal = torch.exp(blank_beta + log_scale)
+    lexical_marginal = torch.exp(lexical_beta + log_scale)
+    next_beta = semirings.Log.plus(blank_beta, lexical_beta)
+    return next_beta, [blank_marginal], [lexical_marginal]
 
 class FrameLabelDependent(TimeSyncAlignmentLattice):
   """k-constrained frame-label-dependent alignment lattice.

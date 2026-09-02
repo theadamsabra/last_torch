@@ -6,12 +6,12 @@ import time
 import tracemalloc
 from typing import Callable
 
-import jax
-import jax.numpy as jnp
-import last
 import last_torch
 import numpy as np
 import torch
+
+# jax/last are imported lazily by the helpers that need them, so this module
+# stays importable in a torch-only venv (see bench_scan_impl.py).
 
 
 # ---------------------------------------------------------------------------
@@ -33,6 +33,8 @@ def time_fn(fn: Callable, warmup: int = 1, repeat: int = 3, number: int = 10) ->
 
 def time_fn_jax(fn: Callable, warmup: int = 1, repeat: int = 3, number: int = 10) -> float:
     """Returns median wall-clock time in milliseconds, blocking until JAX computation finishes."""
+    import jax
+
     def _run():
         result = fn()
         jax.block_until_ready(result)
@@ -91,6 +93,8 @@ def build_jax_table_lattice(vocab_size: int, context_size: int,
                              batch_size: int, max_num_frames: int,
                              table: np.ndarray):
     """Builds a JAX RecognitionLattice with TableWeightFn + NullCacher using an existing table."""
+    import jax.numpy as jnp
+    import last
     table_j = jnp.array(table)
 
     lattice = last.RecognitionLattice(
@@ -128,6 +132,7 @@ def build_torch_rnn_lattice(vocab_size: int, context_size: int):
 
 def build_jax_rnn_lattice(vocab_size: int, context_size: int):
     """Builds a JAX RecognitionLattice with JointWeightFn + SharedRNNCacher."""
+    import last
     context = last.contexts.FullNGram(
         vocab_size=vocab_size, context_size=context_size)
 

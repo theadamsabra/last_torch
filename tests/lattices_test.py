@@ -447,5 +447,65 @@ class ArcMarginalsTest(absltest.TestCase):
           err_msg=f'param grad mismatch: {name}')
 
 
+  def test_string_forward_vjp_matches_autograd(self):
+    """_string_forward's arc-marginals VJP must equal autograd through the scan.
+
+    Same contract as test_forward_backward_vjp_matches_autograd, for the
+    label-aligned recurrence: identical numerator, and identical gradients wrt
+    frames and every weight_fn parameter. The reference is obtained by clearing
+    _align_str_bwd, which routes _string_forward back through the plain scan.
+    """
+    lattice = last_torch.RecognitionLattice(
+        context=last_torch.contexts.FullNGram(vocab_size=2, context_size=1),
+        alignment=last_torch.alignments.FrameDependent(),
+        weight_fn_cacher_factory=weight_fn_cacher_factory,
+        weight_fn_factory=weight_fn_factory)
+    num_frames = torch.Tensor([6, 5, 4, 3])
+    labels = torch.Tensor([[1, 2, 1], [2, 1, 2], [1, 1, 2], [2, 2, 1]])
+    num_labels = torch.Tensor([3, 2, 1, 0])  # all reachable: <= num_frames
+    self.assertIsNotNone(lattice._align_str_bwd,
+                         'FrameDependent should provide string_backward')
+
+    # Force JointWeightFn's lazy nn.Linear allocation before the timed runs so
+    # it does not consume RNG and desynchronise them (build_cache() is itself
+    # non-deterministic, hence the per-run reseed).
+    lattice._precompute_weights(lattice.build_cache(), torch.rand([4, 6, 8]), 1)
+
+    def grads_of(use_vjp):
+      torch.manual_seed(0)
+      frames = torch.rand([4, 6, 8], requires_grad=True)
+      cache = lattice.build_cache()
+      saved = lattice._align_str_bwd
+      if not use_vjp:
+        lattice._align_str_bwd = None
+      try:
+        lattice.zero_grad(set_to_none=True)
+        out = lattice._string_forward(
+            cache=cache, frames=frames, num_frames=num_frames, labels=labels,
+            num_labels=num_labels, semiring=last_torch.semirings.Log)
+        torch.sum(out).backward()
+      finally:
+        lattice._align_str_bwd = saved
+      params = [(n, p.grad) for n, p in lattice.named_parameters()
+                if p.grad is not None]
+      return out.detach(), frames.grad, params
+
+    expected_out, expected_frames_grad, expected_params = grads_of(False)
+    actual_out, actual_frames_grad, actual_params = grads_of(True)
+
+    npt.assert_allclose(
+        actual_out.numpy(), expected_out.numpy(), rtol=1e-5, atol=1e-6)
+    npt.assert_allclose(
+        actual_frames_grad.numpy(), expected_frames_grad.numpy(),
+        rtol=1e-3, atol=1e-5)
+    self.assertGreater(len(expected_params), 0, 'no weight_fn params saw grad')
+    self.assertEqual([n for n, _ in actual_params],
+                     [n for n, _ in expected_params])
+    for (name, actual), (_, expected) in zip(actual_params, expected_params):
+      npt.assert_allclose(
+          actual.numpy(), expected.numpy(), rtol=1e-3, atol=1e-5,
+          err_msg=f'param grad mismatch: {name}')
+
+
 if __name__ == '__main__':
   absltest.main()

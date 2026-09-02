@@ -46,31 +46,67 @@ def bench_isolated(device, T):
     torch.sum(log_z).backward()
 
   autograd = functools.partial(lat._forward, semiring=last_torch.semirings.Log)
-  return (time_torch(lambda: run(autograd)),
-          time_torch(lambda: run(lat._forward_backward)))
+  torch._dynamo.reset()
+  before = time_torch(lambda: run(autograd))
+  torch._dynamo.reset()
+  after = time_torch(lambda: run(lat._forward_backward))
+  return before, after
 
 
-def bench_end_to_end(device, T):
-  """Full loss. 'before' restores the pre-VJP passthrough to _forward."""
+def bench_string(device, T):
+  """_string_forward on its own: autograd baseline vs custom VJP."""
   lat = build_torch_lattice(device)
   frames, num_frames = _inputs(device, T)
   labels = torch.ones([BATCH_SIZE, T], dtype=torch.float32, device=device)
-  num_labels = torch.full([BATCH_SIZE], T, dtype=torch.float32, device=device)
+  num_labels = torch.full([BATCH_SIZE], T // 2, dtype=torch.float32,
+                          device=device)
+  lat._precompute_weights(lat.build_cache(), frames, 1)
+
+  def run():
+    lat.zero_grad(set_to_none=True)
+    frames.grad = None
+    out = lat._string_forward(cache=lat.build_cache(), frames=frames,
+                              num_frames=num_frames, labels=labels,
+                              num_labels=num_labels,
+                              semiring=last_torch.semirings.Log)
+    torch.sum(out).backward()
+
+  torch._dynamo.reset()
+  after = time_torch(run)
+  saved, lat._align_str_bwd = lat._align_str_bwd, None   # back to plain autograd
+  try:
+    torch._dynamo.reset()
+    before = time_torch(run)
+  finally:
+    lat._align_str_bwd = saved
+  return before, after
+
+
+def bench_end_to_end(device, T):
+  """Full loss. 'before' restores both pre-VJP autograd paths."""
+  lat = build_torch_lattice(device)
+  frames, num_frames = _inputs(device, T)
+  labels = torch.ones([BATCH_SIZE, T], dtype=torch.float32, device=device)
+  num_labels = torch.full([BATCH_SIZE], T // 2, dtype=torch.float32,
+                          device=device)
 
   def run():
     lat.zero_grad(set_to_none=True)
     frames.grad = None
     torch.sum(lat(frames, num_frames, labels, num_labels)).backward()
 
+  torch._dynamo.reset()
   after = time_torch(run)
-  # The exact body _forward_backward had before _RecurrenceFn existed.
-  original = lat._forward_backward
+  # The exact bodies these had before _RecurrenceFn / _StringRecurrenceFn.
+  original_fb, original_sb = lat._forward_backward, lat._align_str_bwd
   lat._forward_backward = functools.partial(
       lat._forward, semiring=last_torch.semirings.Log)
+  lat._align_str_bwd = None
   try:
+    torch._dynamo.reset()
     before = time_torch(run)
   finally:
-    lat._forward_backward = original
+    lat._forward_backward, lat._align_str_bwd = original_fb, original_sb
   return before, after
 
 
@@ -78,7 +114,8 @@ def main():
   rows = []
   devices = ['cpu', 'cuda'] if torch.cuda.is_available() else ['cpu']
   for scope, fn, cols in (
-      ('isolated', bench_isolated, ('autograd', 'custom VJP')),
+      ('isolated fb', bench_isolated, ('autograd', 'custom VJP')),
+      ('isolated str', bench_string, ('autograd', 'custom VJP')),
       ('end-to-end', bench_end_to_end, ('before VJP', 'after VJP')),
   ):
     for device in devices:
