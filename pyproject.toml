@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "last_torch"
+dynamic = ["version"]
+description = "Lattice-based speech transducers in PyTorch"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = ["torch>=2.8,<3", "einops>=0.8", "optree>=0.17"]
+
+[project.optional-dependencies]
+audio = ["torchaudio>=2.8,<3", "soundfile>=0.13"]
+test = ["pytest>=8", "numpy>=2", "absl-py>=2"]
+benchmark = ["jax>=0.4", "flax>=0.10", "numpy>=2"]
+dev = ["build>=1", "wheel"]
+
+[project.urls]
+Repository = "https://github.com/theadamsabra/last_torch"
+
+[project.scripts]
+last-torch-spoken-digits = "last_torch.examples.spoken_digits:main"
+last-torch-toy = "last_torch.examples.train_toy:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "last_torch._version.__version__"}
+
+[tool.setuptools.packages.find]
+include = ["last_torch*"]

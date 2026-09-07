@@ -16,6 +16,7 @@
 
 from collections.abc import Callable, Sequence
 from typing import Any, Generic, Optional, Protocol, TypeVar
+import types
 
 import torch
 import torch.nn as nn
@@ -28,6 +29,21 @@ from last_torch import weight_fns
 
 DType = Any
 T = TypeVar('T')
+
+
+def _compile_step(method):
+  """Give each lattice its own Dynamo specialization cache.
+
+  torch.compile caches by Python code object, including for bound methods.
+  Sharing that cache across unrelated lattices can exhaust the recompile limit
+  on different contexts, alignments, devices, and tensor layouts. A code copy
+  isolates those caches without changing process-global compiler settings.
+  """
+  fn = method.__func__
+  isolated = types.FunctionType(fn.__code__.replace(), fn.__globals__,
+                                fn.__name__, fn.__defaults__, fn.__closure__)
+  return torch.compile(types.MethodType(isolated, method.__self__),
+                       fullgraph=True)
 
 
 class _RecurrenceFn(torch.autograd.Function):
@@ -53,7 +69,6 @@ class _RecurrenceFn(torch.autograd.Function):
     batch_dims = num_frames.shape
     in_dim = len(batch_dims)
     T = all_blank.shape[in_dim]
-    num_states = lattice.alignment.num_states()
 
     with torch.no_grad():
       alpha = _init_context_state_weights(
@@ -69,14 +84,8 @@ class _RecurrenceFn(torch.autograd.Function):
       for i in range(T):
         blank_t = all_blank.select(in_dim, i)
         lexical_t = all_lexical.select(in_dim, i)
-        next_alpha = lattice._align_fwd(
-            alpha=alpha,
-            blank=[blank_t for _ in range(num_states)],
-            lexical=[lexical_t for _ in range(num_states)],
-            context=lattice.context,
-            semiring=semirings.Log)
         alpha_list.append(alpha)
-        alpha = torch.where(padding_list[i], alpha, next_alpha)
+        alpha = lattice._step_fwd(alpha, blank_t, lexical_t, padding_list[i])
 
       alpha_0_to_T_minus_1 = torch.stack(alpha_list, dim=in_dim)
       log_z = semirings.Log.sum(alpha, dim=-1)
@@ -97,42 +106,22 @@ class _RecurrenceFn(torch.autograd.Function):
     batch_dims = num_frames.shape
     in_dim = len(batch_dims)
     T = all_blank.shape[in_dim]
-    num_states = lattice.alignment.num_states()
     num_context_states, _ = lattice.context.shape()
 
     beta = semirings.Log.ones([*batch_dims, num_context_states],
-                              log_z.dtype).to(lattice.device)
+                              log_z.dtype, lattice.device)
     padding_list = _padding_masks(num_frames, T, lattice.device)
     # d log_z / d arc_weight is the arc marginal, scaled by the incoming grad.
-    scale = grad_log_z.unsqueeze(-1)
+    scale = grad_log_z.unsqueeze(-1).contiguous()
 
     grad_blank_steps = [None] * T
     grad_lexical_steps = [None] * T
     for t in range(T - 1, -1, -1):
       blank_t = all_blank.select(in_dim, t)
       lexical_t = all_lexical.select(in_dim, t)
-      next_beta, blank_marginal, lexical_marginals = lattice._align_bwd(
-          alpha=alphas.select(in_dim, t),
-          blank=[blank_t for _ in range(num_states)],
-          lexical=[lexical_t for _ in range(num_states)],
-          beta=beta,
-          log_z=log_z,
-          context=lattice.context)
-      # We currently only support alignment-state-invariant weights. For
-      # FrameDependent (num_states == 1) index directly rather than allocating a
-      # stack and a sum per step.
-      if num_states == 1:
-        blank_marginal = blank_marginal[0]
-        lexical_marginals = lexical_marginals[0]
-      else:
-        blank_marginal = torch.sum(torch.stack(blank_marginal), dim=0)
-        lexical_marginals = torch.sum(torch.stack(lexical_marginals), dim=0)
-
-      is_padding = padding_list[t]
-      beta = torch.where(is_padding, beta, next_beta)
-      grad_blank_steps[t] = torch.where(is_padding, 0, blank_marginal) * scale
-      grad_lexical_steps[t] = torch.where(
-          is_padding.unsqueeze(-1), 0, lexical_marginals) * scale.unsqueeze(-1)
+      beta, grad_blank_steps[t], grad_lexical_steps[t] = lattice._step_bwd(
+          alphas.select(in_dim, t), blank_t, lexical_t, beta, log_z,
+          padding_list[t], scale)
 
     return (torch.stack(grad_blank_steps, dim=in_dim),
             torch.stack(grad_lexical_steps, dim=in_dim), None, None)
@@ -157,7 +146,6 @@ class _StringRecurrenceFn(torch.autograd.Function):
     in_dim = len(batch_dims)
     T = blank_weight.shape[in_dim]
     num_alpha_states = blank_weight.shape[-1]
-    num_states = lattice.alignment.num_states()
 
     with torch.no_grad():
       alpha = _init_context_state_weights(
@@ -173,19 +161,14 @@ class _StringRecurrenceFn(torch.autograd.Function):
       for i in range(T):
         b = blank_weight.select(in_dim, i)
         l = lexical_weight.select(in_dim, i)
-        next_alpha = lattice._align_str_fwd(
-            alpha=alpha,
-            blank=[b for _ in range(num_states)],
-            lexical=[l for _ in range(num_states)],
-            semiring=semirings.Log)
         alpha_list.append(alpha)
-        alpha = torch.where(padding_list[i], alpha, next_alpha)
+        alpha = lattice._step_str_fwd(alpha, b, l, padding_list[i])
 
       alpha_0_to_T_minus_1 = torch.stack(alpha_list, dim=in_dim)
       is_final = _string_final_mask(num_labels, num_alpha_states,
                                     blank_weight.device)
       log_z = semirings.Log.sum(
-          torch.where(is_final, alpha, semirings.Log.zeros([], alpha.dtype)),
+          torch.where(is_final, alpha, semirings.Log.zeros([], alpha.dtype, alpha.device)),
           dim=-1)
     return log_z, alpha_0_to_T_minus_1
 
@@ -206,42 +189,25 @@ class _StringRecurrenceFn(torch.autograd.Function):
     in_dim = len(batch_dims)
     T = blank_weight.shape[in_dim]
     num_alpha_states = blank_weight.shape[-1]
-    num_states = lattice.alignment.num_states()
 
     # Unlike _forward, only the state matching num_labels is final, so beta is
     # seeded there rather than at every state.
     is_final = _string_final_mask(num_labels, num_alpha_states,
                                   blank_weight.device)
     beta = torch.where(is_final,
-                       semirings.Log.ones([], log_z.dtype).to(log_z.device),
-                       semirings.Log.zeros([], log_z.dtype).to(log_z.device))
+                       semirings.Log.ones([], log_z.dtype, log_z.device),
+                       semirings.Log.zeros([], log_z.dtype, log_z.device))
     beta = torch.broadcast_to(beta, (*batch_dims, num_alpha_states))
     padding_list = _padding_masks(num_frames, T, blank_weight.device)
-    scale = grad_log_z.unsqueeze(-1)
+    scale = grad_log_z.unsqueeze(-1).contiguous()
 
     grad_blank_steps = [None] * T
     grad_lexical_steps = [None] * T
     for t in range(T - 1, -1, -1):
       b = blank_weight.select(in_dim, t)
       l = lexical_weight.select(in_dim, t)
-      next_beta, blank_marginal, lexical_marginal = lattice._align_str_bwd(
-          alpha=alphas.select(in_dim, t),
-          blank=[b for _ in range(num_states)],
-          lexical=[l for _ in range(num_states)],
-          beta=beta,
-          log_z=log_z)
-      if num_states == 1:
-        blank_marginal = blank_marginal[0]
-        lexical_marginal = lexical_marginal[0]
-      else:
-        blank_marginal = torch.sum(torch.stack(blank_marginal), dim=0)
-        lexical_marginal = torch.sum(torch.stack(lexical_marginal), dim=0)
-
-      is_padding = padding_list[t]
-      beta = torch.where(is_padding, beta, next_beta)
-      grad_blank_steps[t] = torch.where(is_padding, 0, blank_marginal) * scale
-      grad_lexical_steps[t] = torch.where(is_padding, 0,
-                                          lexical_marginal) * scale
+      beta, grad_blank_steps[t], grad_lexical_steps[t] = lattice._step_str_bwd(
+          alphas.select(in_dim, t), b, l, beta, log_z, padding_list[t], scale)
 
     return (torch.stack(grad_blank_steps, dim=in_dim),
             torch.stack(grad_lexical_steps, dim=in_dim), None, None, None)
@@ -354,6 +320,45 @@ class RecognitionLattice(nn.Module, Generic[T]):
     # _string_forward falls back to autograd when this is absent.
     _str_bwd = getattr(self.alignment, 'string_backward', None)
     self._align_str_bwd = torch.compile(_str_bwd) if _str_bwd else None
+    # Include masking and cotangent scaling in the same compilation region as
+    # alignment arithmetic. These wrappers are used by the log-semiring VJPs.
+    self._step_fwd = _compile_step(self._forward_step)
+    self._step_str_fwd = _compile_step(self._string_forward_step)
+    self._step_bwd = _compile_step(self._backward_step)
+    self._step_str_bwd = (_compile_step(self._string_backward_step)
+                          if _str_bwd else None)
+
+  def _forward_step(self, alpha, blank, lexical, padding):
+    n = self.alignment.num_states()
+    next_alpha = self.alignment.forward(
+        alpha, [blank] * n, [lexical] * n, self.context, semirings.Log)
+    return torch.where(padding, alpha, next_alpha)
+
+  def _string_forward_step(self, alpha, blank, lexical, padding):
+    n = self.alignment.num_states()
+    next_alpha = self.alignment.string_forward(
+        alpha, [blank] * n, [lexical] * n, semirings.Log)
+    return torch.where(padding, alpha, next_alpha)
+
+  def _backward_step(self, alpha, blank, lexical, beta, log_z, padding, scale):
+    n = self.alignment.num_states()
+    next_beta, bm, lm = self.alignment.backward(
+        alpha, [blank] * n, [lexical] * n, beta, log_z, self.context)
+    bm = bm[0] if n == 1 else torch.stack(bm).sum(0)
+    lm = lm[0] if n == 1 else torch.stack(lm).sum(0)
+    return (torch.where(padding, beta, next_beta),
+            torch.where(padding, 0, bm) * scale,
+            torch.where(padding.unsqueeze(-1), 0, lm) * scale.unsqueeze(-1))
+
+  def _string_backward_step(self, alpha, blank, lexical, beta, log_z, padding, scale):
+    n = self.alignment.num_states()
+    next_beta, bm, lm = self.alignment.string_backward(
+        alpha, [blank] * n, [lexical] * n, beta, log_z)
+    bm = bm[0] if n == 1 else torch.stack(bm).sum(0)
+    lm = lm[0] if n == 1 else torch.stack(lm).sum(0)
+    return (torch.where(padding, beta, next_beta),
+            torch.where(padding, 0, bm) * scale,
+            torch.where(padding, 0, lm) * scale)
 
   def _precompute_weights(self, cache: T, frames: torch.Tensor,
                           in_dim: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -361,7 +366,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
     # Warm up lazy weight init (JointWeightFn allocates nn.Linear on first call);
     # vmap cannot run random ops so init must happen before we enter vmap.
     self.weight_fn(cache, frames.select(in_dim, 0))
-    # ponytail: vmap over time dim; cache is captured, not vmapped.
+    # Vectorize over time; cache is shared across frames.
     frames_T = frames.movedim(in_dim, 0)  # [T, batch..., features]
     all_blank_T, all_lexical_T = torch.func.vmap(
         lambda f: self.weight_fn(cache, f), in_dims=0, out_dims=0)(frames_T)
@@ -423,17 +428,23 @@ class RecognitionLattice(nn.Module, Generic[T]):
       cache = self.weight_fn_cacher()
       if cache is not None:
         cache = cache.to(self.device)
+    # Globally normalized losses need every context state's weights anyway.
+    # Reuse that table for the reference string instead of evaluating the joint
+    # network again at every (possibly repeated) label position.
+    arc_weights = None
+    if not isinstance(self.weight_fn, weight_fns.LocallyNormalizedWeightFn):
+      arc_weights = self._precompute_weights(cache, frames, len(batch_dims))
     numerator = self._string_forward(
       cache = cache,
       frames = frames.to(self.device),
       num_frames = num_frames.to(self.device),
       labels = labels.to(self.device),
       num_labels = num_labels.to(self.device),
-      semiring = semiring)
+      semiring = semiring, arc_weights=arc_weights)
     if isinstance(self.weight_fn, weight_fns.LocallyNormalizedWeightFn):
       return -numerator
     denominator, _ = self._forward_backward(
-      cache=cache, frames=frames, num_frames=num_frames
+      cache=cache, frames=frames, num_frames=num_frames, arc_weights=arc_weights
     )
     return denominator - numerator
 
@@ -497,7 +508,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
     viterbi_lexical_mask = vjp_fn(torch.ones_like(path_weights))[0]
     is_blank = torch.all(viterbi_lexical_mask == 0, dim=-1)
     alignment_labels = torch.where(is_blank, 0,
-                                   torch.argmax(viterbi_lexical_mask, dim=-1))
+                                   torch.argmax(viterbi_lexical_mask, dim=-1) + 1)
     alignment_labels = alignment_labels.reshape([*batch_dims, -1])
     num_alignment_labels = num_alignment_states * num_frames
     return alignment_labels, num_alignment_labels, path_weights
@@ -506,7 +517,9 @@ class RecognitionLattice(nn.Module, Generic[T]):
   def _string_forward(self, cache: T, frames: torch.Tensor,
                     num_frames: torch.Tensor, labels: torch.Tensor,
                     num_labels: torch.Tensor,
-                    semiring: semirings.Semiring[torch.Tensor]) -> torch.Tensor:
+                    semiring: semirings.Semiring[torch.Tensor],
+                    arc_weights: Optional[tuple[torch.Tensor, torch.Tensor]] = None
+                    ) -> torch.Tensor:
     """Shortest distance on the intersection of the recognition lattice and an output string (the label sequence) computed using the forward algorithm.
 
     Args:
@@ -537,31 +550,44 @@ class RecognitionLattice(nn.Module, Generic[T]):
     context_next_labels = torch.concatenate(
         [labels, torch.ones_like(labels[..., :1])], dim=-1)
 
-    # Warm up lazy weight init before vmap (same reason as in _forward).
-    _ = self.weight_fn(cache, frames.select(-2, 0), context_states.select(-1, 0))
+    if arc_weights is not None:
+      all_blank, all_lexical = arc_weights
+      T = frames.shape[-2]
+      state_indices = context_states.long().unsqueeze(-2).expand(
+          *batch_dims, T, context_states.shape[-1])
+      blank_weight = all_blank.gather(-1, state_indices)
+      # Flatten (context, vocabulary) to gather only the requested lexical arc;
+      # gathering contexts first would materialize [batch..., T, L+1, vocab].
+      lexical_indices = (context_states.long() * all_lexical.shape[-1] +
+                         (context_next_labels.long() - 1).clamp(min=0))
+      lexical_indices = lexical_indices.unsqueeze(-2).expand_as(state_indices)
+      lexical_weight = all_lexical.flatten(-2).gather(-1, lexical_indices)
+    else:
+      # Warm up lazy weight init before vmap (same reason as in _forward).
+      _ = self.weight_fn(cache, frames.select(-2, 0), context_states.select(-1, 0))
 
-    # ponytail: double vmap (outer=label states L+1, inner=frames T).
-    def _weight_for_state(state):
-      return torch.func.vmap(
-          lambda frame: self.weight_fn(cache, frame, state),
-          in_dims=1, out_dims=-1)(frames)
+      # Vectorize over label states and frames for numerator-only calls.
+      def _weight_for_state(state):
+        return torch.func.vmap(
+            lambda frame: self.weight_fn(cache, frame, state),
+            in_dims=1, out_dims=-1)(frames)
 
-    all_blank, all_lex_VT = torch.func.vmap(
-        _weight_for_state, in_dims=-1, out_dims=-1)(context_states)
-    # all_blank:   [batch..., T, L+1]
-    # all_lex_VT:  [batch..., vocab, T, L+1]
+      all_blank, all_lex_VT = torch.func.vmap(
+          _weight_for_state, in_dims=-1, out_dims=-1)(context_states)
+      # all_blank:   [batch..., T, L+1]
+      # all_lex_VT:  [batch..., vocab, T, L+1]
 
-    # Gather lexical weight for each label position using context_next_labels.
-    T = frames.shape[-2]
-    all_lex = all_lex_VT.permute(
-        *range(len(batch_dims)), len(batch_dims)+1, len(batch_dims)+2, len(batch_dims))
-    # all_lex: [batch..., T, L+1, vocab]
-    l_idx = context_next_labels.unsqueeze(-2).expand(
-        *batch_dims, T, context_next_labels.shape[-1])  # [batch..., T, L+1]
-    safe_idx = (l_idx.long() - 1).clamp(min=0)
-    blank_weight = all_blank  # [batch..., T, L+1]
-    lexical_weight = torch.gather(
-        all_lex, -1, safe_idx.unsqueeze(-1)).squeeze(-1)  # [batch..., T, L+1]
+      # Gather lexical weight for each label position using context_next_labels.
+      T = frames.shape[-2]
+      all_lex = all_lex_VT.permute(
+          *range(len(batch_dims)), len(batch_dims)+1, len(batch_dims)+2, len(batch_dims))
+      # all_lex: [batch..., T, L+1, vocab]
+      l_idx = context_next_labels.unsqueeze(-2).expand(
+          *batch_dims, T, context_next_labels.shape[-1])  # [batch..., T, L+1]
+      safe_idx = (l_idx.long() - 1).clamp(min=0)
+      blank_weight = all_blank  # [batch..., T, L+1]
+      lexical_weight = torch.gather(
+          all_lex, -1, safe_idx.unsqueeze(-1)).squeeze(-1)  # [batch..., T, L+1]
 
     # Sequential forward scan over frames using precomputed weights.
     num_alpha_states = labels.shape[-1] + 1
@@ -610,6 +636,7 @@ class RecognitionLattice(nn.Module, Generic[T]):
       semiring: semirings.Semiring[torch.Tensor],
       blank_mask: Optional[Sequence[torch.Tensor]] = None,
       lexical_mask: Optional[Sequence[torch.Tensor]] = None,
+      arc_weights: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
   ) -> tuple[torch.Tensor, torch.Tensor]:
     """Shortest distance on the recognition lattice computed using the forward algorithm.
 
@@ -662,7 +689,9 @@ class RecognitionLattice(nn.Module, Generic[T]):
     out_dim = len(batch_dims)
     T = frames.shape[in_dim]
 
-    all_blank, all_lexical = self._precompute_weights(cache, frames, in_dim)
+    if arc_weights is None:
+      arc_weights = self._precompute_weights(cache, frames, in_dim)
+    all_blank, all_lexical = arc_weights
 
     alpha = _init_context_state_weights(
         batch_dims=batch_dims,
@@ -672,8 +701,6 @@ class RecognitionLattice(nn.Module, Generic[T]):
         semiring=semiring,
         device=self.device)
 
-    has_both = blank_mask is not None and lexical_mask is not None
-    has_lex_only = blank_mask is None and lexical_mask is not None
     num_states = self.alignment.num_states()
 
     padding_list = _padding_masks(num_frames, T, self.device)
@@ -684,15 +711,10 @@ class RecognitionLattice(nn.Module, Generic[T]):
       lexical_t = all_lexical.select(in_dim, i)
       blank = [blank_t for _ in range(num_states)]
       lexical = [lexical_t for _ in range(num_states)]
-      if has_both:
-        bm = blank_mask[0].select(in_dim, i)
-        lm = lexical_mask[0].select(in_dim, i)
-        blank = [b + m for b, m in zip(blank, [bm])]
-        lexical = [l + m for l, m in zip(lexical, [lm])]
-      elif has_lex_only:
-        lm = lexical_mask[0].select(in_dim, i)
-        # ponytail: lm as raw tensor — zip iterates batch dim, stops at len(lexical)=1.
-        lexical = [l + m for l, m in zip(lexical, lm)]
+      if blank_mask is not None:
+        blank = [b + m.select(in_dim, i) for b, m in zip(blank, blank_mask)]
+      if lexical_mask is not None:
+        lexical = [l + m.select(in_dim, i) for l, m in zip(lexical, lexical_mask)]
       next_alpha = self._align_fwd(
           alpha=alpha,
           blank=blank,
@@ -868,7 +890,9 @@ class RecognitionLattice(nn.Module, Generic[T]):
       return final_callback_carry, callback_outputs
 
   def _forward_backward(self, cache: T, frames: torch.Tensor,
-                        num_frames: torch.Tensor) -> torch.Tensor:
+                        num_frames: torch.Tensor,
+                        arc_weights: Optional[tuple[torch.Tensor, torch.Tensor]] = None
+                        ) -> torch.Tensor:
     """Shortest distance under the log semiring, with a custom VJP.
 
     Same value as _forward() under semirings.Log, but the recurrence runs under
@@ -887,7 +911,9 @@ class RecognitionLattice(nn.Module, Generic[T]):
       (log_z, alpha_0_to_T_minus_1) tuple.
     """
     in_dim = len(num_frames.shape)
-    all_blank, all_lexical = self._precompute_weights(cache, frames, in_dim)
+    if arc_weights is None:
+      arc_weights = self._precompute_weights(cache, frames, in_dim)
+    all_blank, all_lexical = arc_weights
     return _RecurrenceFn.apply(all_blank, all_lexical, num_frames, self)
 
 
@@ -895,8 +921,7 @@ def _init_context_state_weights(
     batch_dims: Sequence[int], dtype: DType, num_states: int, start: int,
     semiring: semirings.Semiring[torch.Tensor],
     device:str='cpu') -> torch.Tensor:
-  is_start = torch.arange(num_states) == start
-  is_start = is_start.to(device) 
+  is_start = torch.arange(num_states, device=device) == start
 
   weights = torch.where(is_start, semiring.ones([], dtype, device),
                       semiring.zeros([], dtype, device))

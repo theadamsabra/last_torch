@@ -4,7 +4,7 @@ Three implementations of the same alpha recurrence -- the no_grad scan inside
 _RecurrenceFn -- measured against each other:
 
   loop      current production. Python for-loop with torch.compile on
-            alignment.forward only. Dispatches O(T) compiled kernels; compiles
+            the complete forward step. Dispatches O(T) compiled calls; compiles
             once, and the compilation does not depend on T.
   unrolled  the whole loop inside a single torch.compile. Can fuse across
             steps, but Dynamo specialises on the Python int T, so every
@@ -108,14 +108,9 @@ def _loop(lattice, all_blank, all_lexical, num_frames, alpha):
   padding_list = _padding_masks(num_frames, T, all_blank.device)
   alpha_list = []
   for i in range(T):
-    next_alpha = lattice._align_fwd(
-        alpha=alpha,
-        blank=[all_blank.select(in_dim, i)],
-        lexical=[all_lexical.select(in_dim, i)],
-        context=lattice.context,
-        semiring=semirings.Log)
     alpha_list.append(alpha)
-    alpha = torch.where(padding_list[i], alpha, next_alpha)
+    alpha = lattice._step_fwd(alpha, all_blank.select(in_dim, i),
+                              all_lexical.select(in_dim, i), padding_list[i])
   return semirings.Log.sum(alpha, dim=-1), torch.stack(alpha_list, dim=in_dim)
 
 

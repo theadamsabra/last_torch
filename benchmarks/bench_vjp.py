@@ -9,6 +9,9 @@ comparable:
                by pointing _forward_backward back at plain-autograd _forward,
                which is exactly what it did prior to the custom VJP.
 
+On the current implementation, the full-loss comparison shares arc weights in
+both variants. Its output is separate from the archived pre-sharing vjp.csv.
+
 Usage: .venv/bin/python3 -m benchmarks.bench_vjp
 """
 import functools
@@ -23,7 +26,7 @@ from benchmarks.utils import save_csv
 
 NUM_FRAMES_LIST = [10, 50, 100, 200, 500]
 HEADERS = ['scope', 'device', 'num_frames', 'variant', 'wall_ms']
-CSV_PATH = os.path.join(os.path.dirname(__file__), 'results', 'vjp.csv')
+CSV_PATH = os.path.join(os.path.dirname(__file__), 'results', 'vjp_current.csv')
 
 
 def _inputs(device, T):

@@ -236,8 +236,8 @@ class RecognitionLatticeCorrectnessTest(absltest.TestCase):
       npt.assert_array_equal(num_alignment_labels, num_frames)
       npt.assert_allclose(path_weights, [-3 + 18, 21, 0])
       npt.assert_array_equal(alignment_labels, [
-          [1, 1],
-          [0, 0],
+          [2, 2],
+          [2, 0],
           [0, 0],
       ])
 

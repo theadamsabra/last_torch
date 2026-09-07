@@ -292,7 +292,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
 
     hidden_state, cell_state = rnn_cell(
       self.embedding(
-          torch.Tensor([0]).long().to(self.device)
+          torch.zeros(1, dtype=torch.int64, device=self.device)
         )
       )
     # The table is built from the cell's *output*. Flax's LSTMCell returns
@@ -302,7 +302,7 @@ class SharedRNNCacher(WeightFnCacher[torch.Tensor]):
     inputs = None
     for i in range(self.context_size):
       if i == 0:
-        inputs = self.embedding(torch.arange(1, self.vocab_size + 1).to(self.device))
+        inputs = self.embedding(torch.arange(1, self.vocab_size + 1, device=self.device))
       else:
         inputs = einops.repeat(inputs, 'n ... -> (v n) ...', v=self.vocab_size)
 

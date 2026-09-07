@@ -118,32 +118,14 @@ class ContextDependency(abc.ABC):
       equals to the start state of the context dependency; states[..., i] for
       i > 0 is the state after observing labels[..., i - 1].
     """
-    batch_dims = labels.shape[:-1]
-    start = torch.broadcast_to(torch.tensor(self.start(), device=self.device), 
-                               batch_dims)
+    state = torch.full(labels.shape[:-1], self.start(), dtype=torch.int64,
+                       device=labels.device)
+    states = [state]
+    for label in labels.unbind(-1):
+      state = self.next_state(state, label.long())
+      states.append(state)
+    return torch.stack(states, dim=-1)
 
-    # Define custom scan specifially for next step:
-    def scan(f, init, xs):
-      carry = init
-      ys = torch.Tensor().to(self.device)
-      for x in xs:
-        carry, y = f(carry, x)
-        # Check if zero dimensional tensor to help with concatenation:
-        if (torch.numel(y) == 1) and (y.shape == torch.Size([])):
-          y = torch.unsqueeze(y, 0)
-
-        ys = torch.concatenate([ys, y])
-      return carry, ys.reshape(xs.shape)
-
-    def step(state, label):
-      next_state = self.next_state(state, label)
-      return next_state, next_state
-    
-    time_major_labels = torch.permute(
-      labels, [len(batch_dims), *range(len(batch_dims))])
-    _, time_major_states = scan(step, start, time_major_labels)
-    states = torch.permute(time_major_states, [*range(1, labels.ndim), 0])
-    return torch.concatenate([torch.unsqueeze(start, dim=-1), states], dim=-1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,6 +170,33 @@ class FullNGram(ContextDependency):
   def start(self) -> int:
     return 0
   
+  def walk_states(self, labels: torch.Tensor) -> torch.Tensor:
+    """Encode the last context_size non-epsilon labels at every position.
+
+    Prefix maxima locate the most recent non-epsilon label. Following these
+    positions backwards needs context_size tensor operations, rather than a
+    Python iteration per label. State IDs are sums of label * vocab_size**k,
+    with k=0 for the newest label; this also encodes shorter initial contexts.
+    """
+    labels = labels.long()
+    start = torch.zeros((*labels.shape[:-1], 1), dtype=torch.int64,
+                        device=labels.device)
+    length = labels.shape[-1]
+    if self.context_size == 0 or length == 0:
+      return torch.zeros((*labels.shape[:-1], length + 1), dtype=torch.int64,
+                         device=labels.device)
+    positions = torch.arange(1, length + 1, device=labels.device)
+    last = torch.cummax(torch.where(labels != 0, positions, 0), dim=-1).values
+    padded_labels = torch.cat((start, labels), dim=-1)
+    previous = torch.cat((start, start, last[..., :-1]), dim=-1)
+    states = torch.zeros_like(labels)
+    cursor = last
+    for k in range(min(self.context_size, length)):
+      states = states + padded_labels.gather(-1, cursor) * self.vocab_size**k
+      if k + 1 < min(self.context_size, length):
+        cursor = previous.gather(-1, cursor)
+    return torch.cat((start, states), dim=-1)
+
   def next_state(self, state: torch.Tensor, label: torch.Tensor) -> torch.Tensor:
     num_ascending_states = sum(
       self.vocab_size**i for i in range(self.context_size))
