@@ -50,9 +50,8 @@ python -m last_torch.examples.train_toy --device cuda --steps 30
 ```
 
 It trains an LSTM encoder and a globally normalized lattice on four synthetic
-sequences, printing initial and final loss. It is an overfitting smoke test,
-not a recognition benchmark. Use `--checkpoint runs/toy.pt` to save model and
-optimizer state. The equivalent console command is `last-torch-toy`.
+sequences, printing initial and final loss. We recommend using this to verify
+this works on your environment.
 
 ## Spoken-digit experiment
 
@@ -149,8 +148,10 @@ before measuring recognition accuracy.
 
 ## GPU execution and memory
 
-The globally normalized loss **shares arc weights between the numerator and
-denominator**. This implementation is retained for its memory benefit.
+The globally normalized loss shares arc weights between the numerator and
+denominator. This implementation is retained for its memory benefit.
+
+
 In the recorded RTX 3090 workload, sharing reduced peak allocated tensor memory
 from 99.396 to 29.881 MiB at T=200 and from 514.271 to 86.878 MiB at T=500
 (69.9% and 83.1%). Its latency change alone was negligible.
@@ -175,19 +176,6 @@ loss.backward()
 optimizer.step()
 ```
 
-An upstream encoder needs its parameters included in the optimizer as well.
-Capture is optional and is not enabled by the training CLIs. Input values,
-valid lengths, and parameter values may change; shapes, strides, dtypes, devices,
-and `requires_grad` flags must match capture. Keep a wrapper per shape bucket,
-including a separate bucket for a smaller final batch, or drop that batch.
-Each wrapper consumes graph memory.
-
-Complete backward before replaying a wrapper. Clone outputs or returned gradients
-that must survive another replay. Capture supports first-order gradients and
-requires capture-compatible weight functions. Concurrent replay of one wrapper
-and replacing parameter objects are unsupported; ordinary lattice calls remain
-available.
-
 Recorded loss-plus-gradient latency (milliseconds):
 
 | Execution | T=200 | T=500 |
@@ -199,12 +187,11 @@ Recorded loss-plus-gradient latency (milliseconds):
 
 These are lattice-only measurements: batch 16, feature size 80, vocabulary 4,
 context order 1, float32 with TF32 disabled, and maximum reference length T/2.
+
 Both frameworks compute gradients for frames and all parameters. Timings exclude
 the encoder, optimizer, data loading, and initial compilation/capture. They are
 not end-to-end speech training speedups. Graph capture increases retained memory;
 allocated tensor memory is distinct from reserved or total GPU memory.
-See [measurement details](benchmarks/results/README.md) and [paper.tex](paper.tex)
-for the sequential ablations and limitations.
 
 ## Tests and benchmarks
 
